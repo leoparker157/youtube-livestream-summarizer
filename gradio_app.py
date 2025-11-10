@@ -253,6 +253,9 @@ class LivestreamSummarizerGradio:
         self.should_stop = False
         self.progress_log = []
         self.summaries = []
+        self.last_end_index = -1  # Reset for new run
+        self.processing = False  # Reset processing flag
+        self.new_summary_available = False  # Reset summary flag
         
         # Setup directories
         script_dir = Path.cwd()
@@ -320,9 +323,13 @@ class LivestreamSummarizerGradio:
                 # Calculate required max index for next cycle
                 can_process = False
                 max_index = -1  # Initialize
+                current_count = 0
+                
                 if segments:
                     try:
                         max_index = max(int(seg.stem.split('_')[1]) for seg in segments if seg.stem.split('_')[1].isdigit())
+                        current_count = max_index + 1
+                        
                         if self.last_end_index == -1:
                             # First cycle: need at least num_segments
                             required_max_index = num_segments - 1
@@ -331,11 +338,10 @@ class LivestreamSummarizerGradio:
                             required_max_index = self.last_end_index + num_segments - overlap_segments
                         
                         can_process = max_index >= required_max_index and not self.processing
-                        current_count = max_index + 1
-                    except ValueError:
+                    except (ValueError, StopIteration):
+                        # If parsing fails, we still have segments, just can't get max index
                         current_count = len(segments)
-                else:
-                    current_count = 0
+                        max_index = -1
                 
                 if can_process:
                     cycle_count += 1
@@ -428,30 +434,36 @@ class LivestreamSummarizerGradio:
                     self.processing = False
                 else:
                     # Show waiting status with live file size update like main.py
-                    if segments and max_index >= 0:
+                    if segments:
                         try:
-                            # Get the current segment being recorded (highest index)
-                            current_segment = max(segments, key=lambda s: int(s.stem.split('_')[1]))
+                            # Get the current segment being recorded (highest index by filename)
+                            current_segment = max(segments, key=lambda s: int(s.stem.split('_')[1]) if s.stem.split('_')[1].isdigit() else -1)
                             current_size = current_segment.stat().st_size
                             size_mb = current_size / (1024 * 1024)
                             
-                            # Show as "Finalizing" if it's the last segment needed for current cycle
-                            if self.last_end_index == -1:
-                                needed_index = num_segments - 1
+                            # Show as "Finalizing" if we have valid max_index and it's the last segment needed
+                            if max_index >= 0:
+                                if self.last_end_index == -1:
+                                    needed_index = num_segments - 1
+                                else:
+                                    needed_index = self.last_end_index + num_segments - overlap_segments
+                                
+                                if max_index >= needed_index:
+                                    # We're ready to process, show finalizing status
+                                    yield self.log_progress(f"🔄 Finalizing: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                                else:
+                                    # Still waiting, show progress
+                                    remaining = needed_index - max_index
+                                    yield self.log_progress(f"⏳ Waiting for {remaining} more segments... | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
                             else:
-                                needed_index = self.last_end_index + num_segments - overlap_segments
-                            
-                            if max_index >= needed_index:
-                                # We're ready to process, show finalizing status
-                                yield self.log_progress(f"🔄 Finalizing: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
-                            else:
-                                # Still waiting, show progress
-                                remaining = needed_index - max_index
-                                yield self.log_progress(f"⏳ Waiting for {remaining} more segments... | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
-                        except (ValueError, OSError):
-                            yield self.log_progress(f"⏳ Waiting for segments..."), "\n".join(self.summaries)
+                                # No valid max_index yet, but show current recording
+                                yield self.log_progress(f"⏳ Accumulating segments ({current_count}/{num_segments})... | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                        except (ValueError, OSError, ZeroDivisionError) as e:
+                            # Fallback if we can't get segment info
+                            yield self.log_progress(f"⏳ Waiting for segments... ({current_count} found)"), "\n".join(self.summaries)
                     else:
-                        yield self.log_progress(f"⏳ Waiting for segments..."), "\n".join(self.summaries)
+                        # No segments yet
+                        yield self.log_progress(f"⏳ Waiting for first segment to start..."), "\n".join(self.summaries)
                 
                 # Check if background thread completed a summary
                 if self.new_summary_available:
