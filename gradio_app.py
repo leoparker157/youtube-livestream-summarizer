@@ -108,24 +108,40 @@ class LivestreamSummarizerGradio:
         except:
             return False
     
-    def summarize_with_gemini(self, compressed_file, api_key, prompt_text):
+    def summarize_with_gemini(self, compressed_file, api_key, prompt_text, use_google_search=False):
         """Send video to Gemini and get summary"""
         try:
             client = genai.Client(api_key=api_key)
             
             # Upload video
+            self.log_progress("📤 Uploading video to Gemini...")
             video_file = client.files.upload(file=compressed_file)
             
             # Wait for processing
+            self.log_progress("⏳ Waiting for Gemini to process video...")
+            poll_count = 0
             while video_file.state.name == "PROCESSING":
                 time.sleep(5)
                 video_file = client.files.get(name=video_file.name)
+                poll_count += 1
+                if poll_count % 6 == 0:  # Log every 30 seconds
+                    self.log_progress(f"⏳ Still processing... ({poll_count * 5}s elapsed)")
             
             if video_file.state.name != "ACTIVE":
+                self.log_progress(f"❌ Video upload failed: {video_file.state.name}")
                 return None
             
-            # Generate summary
-            config = types.GenerateContentConfig()
+            self.log_progress("✅ Video uploaded and active")
+            
+            # Generate summary with optional Google Search
+            if use_google_search:
+                self.log_progress("🔍 Generating summary with Google Search enabled...")
+                grounding_tool = types.Tool(google_search=types.GoogleSearch())
+                config = types.GenerateContentConfig(tools=[grounding_tool])
+            else:
+                self.log_progress("🤖 Generating summary...")
+                config = types.GenerateContentConfig()
+            
             response = client.models.generate_content(
                 model='gemini-2.0-flash-exp',
                 contents=[
@@ -135,9 +151,16 @@ class LivestreamSummarizerGradio:
                 config=config
             )
             
-            return response.text if response.text else None
+            if response.text:
+                self.log_progress("✅ Summary generated successfully")
+                return response.text
+            else:
+                self.log_progress("❌ Summary was empty")
+                return None
         except Exception as e:
-            logger.error(f"Gemini error: {e}")
+            error_msg = str(e)
+            self.log_progress(f"❌ Gemini error: {error_msg}")
+            logger.error(f"Gemini error details: {e}")
             return None
     
     def cleanup_old_segments(self, segments_dir, keep_count):
@@ -151,7 +174,7 @@ class LivestreamSummarizerGradio:
                     pass
     
     def run_summarizer(self, youtube_url, api_key, video_duration, segment_duration, 
-                       overlap_segments, prompt_text, progress=gr.Progress()):
+                       overlap_segments, prompt_text, use_google_search, progress=gr.Progress()):
         """Main summarization loop"""
         self.should_stop = False
         self.progress_log = []
@@ -165,6 +188,8 @@ class LivestreamSummarizerGradio:
         compressed_file = script_dir / "compressed.mp4"
         
         num_segments = video_duration // segment_duration
+        
+        yield self.log_progress(f"⚙️ Configuration: {video_duration}s clips, {segment_duration}s segments, {num_segments} segments per cycle"), ""
         
         # Extract HLS URL
         yield self.log_progress("🔍 Extracting HLS URL from YouTube..."), ""
@@ -206,14 +231,20 @@ class LivestreamSummarizerGradio:
                     
                     yield self.log_progress(f"📊 Cycle #{cycle_count}: Processing {num_segments} segments..."), "\n".join(self.summaries)
                     
+                    # Get segment details
+                    segment_files = sorted(segments_dir.glob('segment_*.mp4'))[-num_segments:]
+                    total_size = sum(seg.stat().st_size for seg in segment_files) / (1024 * 1024)
+                    yield self.log_progress(f"📁 Using segments: {segment_files[0].name} to {segment_files[-1].name} ({total_size:.1f} MB)"), "\n".join(self.summaries)
+                    
                     # Concatenate
                     yield self.log_progress("🔗 Concatenating segments..."), "\n".join(self.summaries)
                     if self.concatenate_segments(segments_dir, concat_file, compressed_file, num_segments):
-                        yield self.log_progress("✅ Concatenation complete"), "\n".join(self.summaries)
+                        final_size = compressed_file.stat().st_size / (1024 * 1024)
+                        yield self.log_progress(f"✅ Concatenation complete ({final_size:.1f} MB)"), "\n".join(self.summaries)
                         
                         # Summarize
                         yield self.log_progress("🤖 Sending to Gemini AI..."), "\n".join(self.summaries)
-                        summary = self.summarize_with_gemini(compressed_file, api_key, prompt_text)
+                        summary = self.summarize_with_gemini(compressed_file, api_key, prompt_text, use_google_search)
                         
                         if summary:
                             yield self.log_progress(f"✅ Summary #{cycle_count} received"), self.add_summary(summary)
@@ -221,9 +252,11 @@ class LivestreamSummarizerGradio:
                             yield self.log_progress("❌ Summary generation failed"), "\n".join(self.summaries)
                         
                         # Cleanup
+                        yield self.log_progress("🧹 Cleaning up temporary files..."), "\n".join(self.summaries)
                         if compressed_file.exists():
                             compressed_file.unlink()
                         self.cleanup_old_segments(segments_dir, num_segments + 5)
+                        yield self.log_progress("✅ Cleanup complete"), "\n".join(self.summaries)
                     else:
                         yield self.log_progress("❌ Concatenation failed"), "\n".join(self.summaries)
                     
@@ -306,6 +339,12 @@ def create_interface():
                         step=1,
                         info="Number of overlapping segments between cycles"
                     )
+                    
+                    use_google_search = gr.Checkbox(
+                        label="Enable Google Search Grounding",
+                        value=False,
+                        info="Allow Gemini to use Google Search for more context (may increase processing time)"
+                    )
                 
                 with gr.Accordion("✏️ Custom Prompt", open=True):
                     prompt_text = gr.Textbox(
@@ -360,7 +399,7 @@ def create_interface():
         # Event handlers
         start_btn.click(
             fn=summarizer.run_summarizer,
-            inputs=[youtube_url, api_key, video_duration, segment_duration, overlap_segments, prompt_text],
+            inputs=[youtube_url, api_key, video_duration, segment_duration, overlap_segments, prompt_text, use_google_search],
             outputs=[progress_output, summary_output]
         )
         
