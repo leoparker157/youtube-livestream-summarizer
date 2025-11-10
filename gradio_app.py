@@ -29,6 +29,9 @@ logging.getLogger('google').setLevel(logging.WARNING)
 class LivestreamSummarizerGradio:
     def __init__(self):
         self.recording_process = None
+        self.ffmpeg_stderr = None  # Store FFmpeg stderr for debugging
+        self.segment_stall_check_time = None  # Track when we first detected potential stall
+        self.last_segment_size = 0  # Track segment size changes
         self.processing = False
         self.should_stop = False
         self.last_end_index = -1
@@ -51,8 +54,45 @@ class LivestreamSummarizerGradio:
         self.summaries.append(summary_entry)
         return "\n".join(self.summaries)
     
+    def check_nvenc_available(self):
+        """Check if NVIDIA NVENC encoder is available"""
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-encoders'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            return 'h264_nvenc' in result.stdout
+        except:
+            return False
+    
     def start_recording(self, hls_url, segment_duration, segments_dir):
-        """Start FFmpeg recording"""
+        """Start FFmpeg recording with GPU detection and error capture"""
+        
+        # Check for NVENC availability
+        has_nvenc = self.check_nvenc_available()
+        
+        if has_nvenc:
+            self.log_progress("🎮 GPU detected - using h264_nvenc hardware encoding")
+            video_codec = 'h264_nvenc'
+            codec_preset = 'fast'
+            codec_options = [
+                '-rc', 'cbr',
+                '-b:v', '500k',
+                '-maxrate', '500k',
+                '-bufsize', '500k'
+            ]
+        else:
+            self.log_progress("⚠️ No GPU detected - using CPU encoding (slower)")
+            video_codec = 'libx264'
+            codec_preset = 'ultrafast'
+            codec_options = [
+                '-crf', '28',
+                '-maxrate', '500k',
+                '-bufsize', '1000k'
+            ]
+        
         cmd = [
             'ffmpeg',
             '-i', hls_url,
@@ -60,19 +100,24 @@ class LivestreamSummarizerGradio:
             '-segment_time', str(segment_duration),
             '-segment_wrap', '0',  # Never wrap segment numbers (allows unlimited segments)
             '-reset_timestamps', '1',  # Reset timestamps for each segment
-            '-c:v', 'h264_nvenc',
-            '-preset', 'fast',
-            '-rc', 'cbr',
-            '-b:v', '500k',
-            '-maxrate', '500k',
-            '-bufsize', '500k',
+            '-c:v', video_codec,
+            '-preset', codec_preset,
+        ] + codec_options + [
             '-vf', 'scale=-2:720,fps=30',
             '-c:a', 'aac',
             '-b:a', '64k',
             '-movflags', '+faststart',
             str(segments_dir / 'segment_%03d.mp4')
         ]
-        self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Capture stderr for error diagnosis
+        self.recording_process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1
+        )
         time.sleep(5)
     
     def validate_segment(self, segment_path):
@@ -302,6 +347,8 @@ class LivestreamSummarizerGradio:
         self.last_end_index = -1  # Reset for new run
         self.processing = False  # Reset processing flag
         self.new_summary_available = False  # Reset summary flag
+        self.segment_stall_check_time = None  # Reset stall detection
+        self.last_segment_size = 0  # Reset segment size tracking
         
         # Setup directories
         script_dir = Path.cwd()
@@ -382,7 +429,33 @@ class LivestreamSummarizerGradio:
             while not self.should_stop:
                 # Check if FFmpeg recording process is still running
                 if self.recording_process and self.recording_process.poll() is not None:
-                    yield self.log_progress(f"❌ FFmpeg process died! Exit code: {self.recording_process.returncode}"), "\n".join(self.summaries)
+                    # FFmpeg died - capture stderr for diagnostics
+                    error_msg = f"❌ FFmpeg process died! Exit code: {self.recording_process.returncode}"
+                    
+                    # Try to get stderr output
+                    try:
+                        if self.recording_process.stderr:
+                            stderr_output = self.recording_process.stderr.read()
+                            if stderr_output:
+                                # Get last 10 lines of error output
+                                error_lines = stderr_output.strip().split('\n')[-10:]
+                                yield self.log_progress(error_msg), "\n".join(self.summaries)
+                                yield self.log_progress("📋 FFmpeg error output:"), "\n".join(self.summaries)
+                                for line in error_lines:
+                                    yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
+                            else:
+                                yield self.log_progress(error_msg), "\n".join(self.summaries)
+                                yield self.log_progress("  (No error output captured)"), "\n".join(self.summaries)
+                    except:
+                        yield self.log_progress(error_msg), "\n".join(self.summaries)
+                    
+                    # Common issue hints
+                    yield self.log_progress(""), "\n".join(self.summaries)
+                    yield self.log_progress("💡 Common fixes:"), "\n".join(self.summaries)
+                    yield self.log_progress("  1. Check if HLS URL is still valid"), "\n".join(self.summaries)
+                    yield self.log_progress("  2. Verify stream is live"), "\n".join(self.summaries)
+                    yield self.log_progress("  3. Check internet connection"), "\n".join(self.summaries)
+                    yield self.log_progress("  4. Try re-extracting HLS URL"), "\n".join(self.summaries)
                     break
                 
                 # Check segments
@@ -515,6 +588,31 @@ class LivestreamSummarizerGradio:
                             current_segment = max(segments, key=lambda s: int(s.stem.split('_')[1]) if s.stem.split('_')[1].isdigit() else -1)
                             current_size = current_segment.stat().st_size
                             size_mb = current_size / (1024 * 1024)
+                            
+                            # STALL DETECTION: Check if segment is stuck at 0 MB
+                            if current_size == 0 and size_mb == 0.0:
+                                if self.segment_stall_check_time is None:
+                                    # First time seeing 0 MB - start timer
+                                    self.segment_stall_check_time = time.time()
+                                elif time.time() - self.segment_stall_check_time > segment_duration * 2:
+                                    # Segment stuck at 0 MB for 2x segment duration - likely stalled
+                                    yield self.log_progress(f"⚠️ WARNING: {current_segment.name} stuck at 0.0 MB for {int(time.time() - self.segment_stall_check_time)}s"), "\n".join(self.summaries)
+                                    yield self.log_progress("💡 This usually means FFmpeg is stalled. Check:"), "\n".join(self.summaries)
+                                    yield self.log_progress("  1. Is the stream still live?"), "\n".join(self.summaries)
+                                    yield self.log_progress("  2. Is HLS URL still valid?"), "\n".join(self.summaries)
+                                    yield self.log_progress("  3. Network connection stable?"), "\n".join(self.summaries)
+                                    
+                                    # Check if FFmpeg is actually still running
+                                    if self.recording_process and self.recording_process.poll() is None:
+                                        yield self.log_progress("  ℹ️ FFmpeg process is still running but not writing data"), "\n".join(self.summaries)
+                                    
+                                    # Reset timer to avoid spamming
+                                    self.segment_stall_check_time = time.time()
+                            else:
+                                # Segment is growing - reset stall detection
+                                if current_size != self.last_segment_size:
+                                    self.segment_stall_check_time = None
+                                    self.last_segment_size = current_size
                             
                             # Show as "Finalizing" if we have valid max_index and it's the last segment needed
                             if max_index >= 0:
