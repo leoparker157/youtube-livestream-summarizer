@@ -629,6 +629,7 @@ class LivestreamSummarizerGradio:
                     wait_start = time.time()
                     wait_timeout = segment_duration * 2  # 2x segment duration
                     last_cycle_size = 0
+                    finalizing_stall_start = None  # Track stall during finalization
                     
                     while time.time() - wait_start < wait_timeout:
                         if next_segment_path.exists() and next_segment_path.stat().st_size > 0:
@@ -641,9 +642,35 @@ class LivestreamSummarizerGradio:
                             try:
                                 current_size = last_segment_path.stat().st_size
                                 if current_size != last_cycle_size:
+                                    # Size changed - reset stall detection
                                     last_cycle_size = current_size
+                                    finalizing_stall_start = None
                                     size_mb = current_size / (1024 * 1024)
                                     yield self.log_progress(f"🔄 Finalizing: {last_segment_path.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                                else:
+                                    # Size hasn't changed - check for stall
+                                    if finalizing_stall_start is None:
+                                        finalizing_stall_start = time.time()
+                                    elif time.time() - finalizing_stall_start >= 3:
+                                        # Stalled for 3+ seconds during finalization
+                                        stall_duration = int(time.time() - finalizing_stall_start)
+                                        size_mb = current_size / (1024 * 1024)
+                                        yield self.log_progress(f"🚨 STALL DETECTED: {last_segment_path.name} not growing for {stall_duration}s at {size_mb:.1f} MB"), "\n".join(self.summaries)
+                                        
+                                        # Check restart cooldown
+                                        if time.time() - self.last_restart_time < 30:
+                                            yield self.log_progress(f"⚠️ Skipping restart (last restart was {int(time.time() - self.last_restart_time)}s ago)"), "\n".join(self.summaries)
+                                        else:
+                                            yield self.log_progress("🔄 Attempting to restart FFmpeg..."), "\n".join(self.summaries)
+                                            
+                                            if self.restart_ffmpeg(segment_duration, segments_dir):
+                                                yield self.log_progress("✅ FFmpeg restarted successfully"), "\n".join(self.summaries)
+                                                # Break out and wait for new segments
+                                                break
+                                            else:
+                                                yield self.log_progress("❌ FFmpeg restart failed - stopping"), "\n".join(self.summaries)
+                                                self.should_stop = True
+                                                break
                             except OSError:
                                 pass
                         
