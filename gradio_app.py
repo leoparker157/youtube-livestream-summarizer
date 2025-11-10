@@ -136,8 +136,8 @@ class LivestreamSummarizerGradio:
         ]
         
         self.log_progress(f"⚙️ FFmpeg: 720p H.264 @ 500k CBR + 64k audio")
-        # Use DEVNULL like main.py (not capturing stderr)
-        self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Capture stderr for debugging (but don't print to console)
+        self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         time.sleep(5)
     
     def validate_segment(self, segment_path):
@@ -471,29 +471,41 @@ class LivestreamSummarizerGradio:
                     else:
                         yield self.log_progress(f"� No segments found on disk"), "\n".join(self.summaries)
                     
-                    # Try to get stderr output
+                    # Try to get stderr output (read whatever's available without blocking)
                     yield self.log_progress(""), "\n".join(self.summaries)
                     try:
                         if self.recording_process.stderr:
+                            # Read all available stderr (non-blocking)
                             stderr_output = self.recording_process.stderr.read()
-                            if stderr_output:
-                                # Get last 20 lines of error output
-                                error_lines = stderr_output.strip().split('\n')[-20:]
-                                yield self.log_progress("📋 FFmpeg error output (last 20 lines):"), "\n".join(self.summaries)
+                            if stderr_output and stderr_output.strip():
+                                # Get last 30 lines of error output for better context
+                                error_lines = stderr_output.strip().split('\n')[-30:]
+                                yield self.log_progress("📋 FFmpeg output (last 30 lines):"), "\n".join(self.summaries)
                                 for line in error_lines:
-                                    yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
+                                    if line.strip():  # Skip empty lines
+                                        yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
                             else:
-                                yield self.log_progress("📋 (No FFmpeg error output captured)"), "\n".join(self.summaries)
+                                yield self.log_progress("📋 (FFmpeg stderr was empty)"), "\n".join(self.summaries)
+                        else:
+                            yield self.log_progress("📋 (FFmpeg stderr not available)"), "\n".join(self.summaries)
                     except Exception as e:
                         yield self.log_progress(f"📋 Error reading FFmpeg output: {e}"), "\n".join(self.summaries)
                     
                     # Common issue hints
                     yield self.log_progress(""), "\n".join(self.summaries)
-                    yield self.log_progress("💡 Common fixes:"), "\n".join(self.summaries)
-                    yield self.log_progress("  1. Check if HLS URL is still valid"), "\n".join(self.summaries)
-                    yield self.log_progress("  2. Verify stream is live"), "\n".join(self.summaries)
-                    yield self.log_progress("  3. Check internet connection"), "\n".join(self.summaries)
-                    yield self.log_progress("  4. Try re-extracting HLS URL"), "\n".join(self.summaries)
+                    yield self.log_progress("💡 Diagnosis:"), "\n".join(self.summaries)
+                    yield self.log_progress("  Exit code 0 = FFmpeg thinks it finished successfully"), "\n".join(self.summaries)
+                    yield self.log_progress("  This usually means the HLS stream URL EXPIRED"), "\n".join(self.summaries)
+                    yield self.log_progress(""), "\n".join(self.summaries)
+                    yield self.log_progress("💡 Why this happens:"), "\n".join(self.summaries)
+                    yield self.log_progress("  YouTube HLS URLs expire after a few minutes"), "\n".join(self.summaries)
+                    yield self.log_progress("  FFmpeg reaches 'end of stream' when URL expires"), "\n".join(self.summaries)
+                    yield self.log_progress("  We need to re-extract fresh URLs periodically"), "\n".join(self.summaries)
+                    yield self.log_progress(""), "\n".join(self.summaries)
+                    yield self.log_progress("💡 Current workarounds:"), "\n".join(self.summaries)
+                    yield self.log_progress("  1. Use shorter video durations (60-90s instead of 120s)"), "\n".join(self.summaries)
+                    yield self.log_progress("  2. Restart the summarizer every ~2 minutes"), "\n".join(self.summaries)
+                    yield self.log_progress("  3. Wait for automatic URL refresh feature (coming soon)"), "\n".join(self.summaries)
                     break
                 
                 # Check segments
