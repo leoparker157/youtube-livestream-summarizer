@@ -102,14 +102,15 @@ class LivestreamSummarizerGradio:
                 '-bufsize', '500k'
             ]
         else:
-            self.log_progress("⚠️ No GPU detected - using CPU encoding (slower)")
-            video_codec = 'libx264'
-            codec_preset = 'ultrafast'
-            codec_options = [
-                '-crf', '28',
-                '-maxrate', '500k',
-                '-bufsize', '1000k'
-            ]
+            self.log_progress("❌ ERROR: No GPU detected!")
+            self.log_progress("⚠️ GPU (h264_nvenc) is REQUIRED for livestream recording")
+            self.log_progress("⚠️ CPU encoding is too slow for real-time livestreams")
+            self.log_progress("📝 In Google Colab: Runtime → Change runtime type → T4 GPU")
+            raise RuntimeError(
+                "GPU with h264_nvenc encoder is required. "
+                "Please enable GPU in Colab (Runtime → Change runtime type → T4 GPU) "
+                "and restart the runtime."
+            )
         
         # FFmpeg command - EXACTLY as in main.py
         cmd = [
