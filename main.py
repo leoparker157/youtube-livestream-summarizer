@@ -19,7 +19,7 @@ from google.genai import types
 
 # Configuration Constants
 VIDEO_DURATION_SECONDS = 120  # Duration of video clips to send to Gemini (in seconds)
-SEGMENT_DURATION = 10  # Duration of each video segment (in seconds)
+SEGMENT_DURATION = 30  # Duration of each video segment (in seconds)
 NUM_SEGMENTS = VIDEO_DURATION_SECONDS // SEGMENT_DURATION  # Number of segments needed
 OVERLAP_SEGMENTS = 0  # Number of overlapping segments between cycles
 OVERLAP_SECONDS = OVERLAP_SEGMENTS * SEGMENT_DURATION  # Duration of overlap (calculated)
@@ -143,6 +143,8 @@ class LivestreamSummarizer:
             '-i', self.hls_url,
             '-f', 'segment',
             '-segment_time', str(SEGMENT_DURATION),
+            '-segment_wrap', '0',  # Never wrap segment numbers (allows unlimited segments)
+            '-reset_timestamps', '1',  # Reset timestamps for each segment
             '-c:v', 'h264_nvenc',  # NVIDIA hardware-accelerated H.264 (faster than H.265)
             '-preset', 'fast',  # Fast preset for maximum speed (ultrafast not available for NVENC)
             '-rc', 'cbr',  # Constant bitrate for consistent speed

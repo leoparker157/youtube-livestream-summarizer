@@ -58,6 +58,8 @@ class LivestreamSummarizerGradio:
             '-i', hls_url,
             '-f', 'segment',
             '-segment_time', str(segment_duration),
+            '-segment_wrap', '0',  # Never wrap segment numbers (allows unlimited segments)
+            '-reset_timestamps', '1',  # Reset timestamps for each segment
             '-c:v', 'h264_nvenc',
             '-preset', 'fast',
             '-rc', 'cbr',
@@ -314,6 +316,11 @@ class LivestreamSummarizerGradio:
         
         try:
             while not self.should_stop:
+                # Check if FFmpeg recording process is still running
+                if self.recording_process and self.recording_process.poll() is not None:
+                    yield self.log_progress(f"❌ FFmpeg process died! Exit code: {self.recording_process.returncode}"), "\n".join(self.summaries)
+                    break
+                
                 # Check segments
                 segments = list(segments_dir.glob('segment_*.mp4'))
                 
