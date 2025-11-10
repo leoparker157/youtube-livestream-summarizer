@@ -138,6 +138,10 @@ segments/
 last10.mp4
 compressed.mp4
 
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
 # Log files
 *.log
 

@@ -1,3 +1,5 @@
 google-genai
 schedule
 python-dotenv
+gradio
+yt-dlp
