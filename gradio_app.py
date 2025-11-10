@@ -37,7 +37,7 @@ class LivestreamSummarizerGradio:
         
     def log_progress(self, message):
         """Add message to progress log"""
-        timestamp = datetime.now().strftime('%H:%M:%S')
+        timestamp = time.strftime('%H:%M:%S')
         log_entry = f"[{timestamp}] {message}"
         self.progress_log.append(log_entry)
         logger.info(message)
@@ -45,7 +45,7 @@ class LivestreamSummarizerGradio:
     
     def add_summary(self, summary_text):
         """Add summary to summaries list"""
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         summary_entry = f"📝 Summary at {timestamp}\n{'='*60}\n{summary_text}\n\n"
         self.summaries.append(summary_entry)
         return "\n".join(self.summaries)
