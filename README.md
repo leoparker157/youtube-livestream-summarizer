@@ -174,8 +174,6 @@ The web interface provides an intuitive way to configure and monitor livestream 
 MIT License - see LICENSE file for details
 
 ## Links
-
-- **GitHub Repository**: [leoparker157/youtube-livestream-summarizer](https://github.com/leoparker157/youtube-livestream-summarizer)
 - **Google AI Studio**: [Get API Key](https://aistudio.google.com/app/apikey)
 - **Gemini API Docs**: [Google Generative AI](https://ai.google.dev/)
 - **FFmpeg Documentation**: [ffmpeg.org](https://ffmpeg.org/documentation.html)
