@@ -140,6 +140,11 @@ class LivestreamSummarizer:
         # This eliminates the need for separate compression step later
         cmd = [
             'ffmpeg',
+            # HLS input options for stability and reconnection
+            '-reconnect', '1',              # Enable automatic reconnection
+            '-reconnect_streamed', '1',     # Reconnect to streamed (HLS) input
+            '-reconnect_delay_max', '10',   # Max delay between reconnects (10 seconds)
+            '-timeout', '30000000',         # 30 second timeout (in microseconds)
             '-i', self.hls_url,
             '-f', 'segment',
             '-segment_time', str(SEGMENT_DURATION),

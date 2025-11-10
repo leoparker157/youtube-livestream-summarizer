@@ -112,9 +112,14 @@ class LivestreamSummarizerGradio:
                 "and restart the runtime."
             )
         
-        # FFmpeg command - EXACTLY as in main.py
+        # FFmpeg command with HLS timeout and reconnect options
         cmd = [
             'ffmpeg',
+            # HLS input options for stability
+            '-reconnect', '1',              # Enable automatic reconnection
+            '-reconnect_streamed', '1',     # Reconnect to streamed (HLS) input
+            '-reconnect_delay_max', '10',   # Max delay between reconnects (10 seconds)
+            '-timeout', '30000000',         # 30 second timeout (in microseconds)
             '-i', hls_url,
             '-f', 'segment',
             '-segment_time', str(segment_duration),
