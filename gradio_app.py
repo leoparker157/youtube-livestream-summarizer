@@ -113,6 +113,19 @@ class LivestreamSummarizerGradio:
         except:
             return False
     
+    def check_nvenc_available(self):
+        """Check if NVIDIA NVENC encoder is available"""
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-encoders'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            return 'h264_nvenc' in result.stdout
+        except:
+            return False
+    
     def start_recording(self, hls_url, segment_duration, segments_dir):
         """Start FFmpeg recording with GPU detection and error capture"""
         
