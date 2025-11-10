@@ -281,6 +281,7 @@ class LivestreamSummarizerGradio:
                 
                 # Calculate required max index for next cycle
                 can_process = False
+                max_index = -1  # Initialize
                 if segments:
                     try:
                         max_index = max(int(seg.stem.split('_')[1]) for seg in segments if seg.stem.split('_')[1].isdigit())
@@ -381,22 +382,27 @@ class LivestreamSummarizerGradio:
                     
                     self.processing = False
                 else:
-                    # Show waiting status with live file size update
-                    if segments:
+                    # Show waiting status with live file size update like main.py
+                    if segments and max_index >= 0:
                         try:
                             # Get the current segment being recorded (highest index)
                             current_segment = max(segments, key=lambda s: int(s.stem.split('_')[1]))
                             current_size = current_segment.stat().st_size
                             size_mb = current_size / (1024 * 1024)
                             
-                            # Calculate how many more segments needed
+                            # Show as "Finalizing" if it's the last segment needed for current cycle
                             if self.last_end_index == -1:
-                                # First cycle: show count toward num_segments
-                                yield self.log_progress(f"⏳ Waiting for segments... ({current_count}/{num_segments}) | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                                needed_index = num_segments - 1
                             else:
-                                # Subsequent cycles: show index progress
                                 needed_index = self.last_end_index + num_segments - overlap_segments
-                                yield self.log_progress(f"⏳ Waiting for segment {needed_index}... (current: {max_index}) | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                            
+                            if max_index >= needed_index:
+                                # We're ready to process, show finalizing status
+                                yield self.log_progress(f"🔄 Finalizing: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                            else:
+                                # Still waiting, show progress
+                                remaining = needed_index - max_index
+                                yield self.log_progress(f"⏳ Waiting for {remaining} more segments... | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
                         except (ValueError, OSError):
                             yield self.log_progress(f"⏳ Waiting for segments..."), "\n".join(self.summaries)
                     else:
