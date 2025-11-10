@@ -447,24 +447,40 @@ class LivestreamSummarizerGradio:
                 # Check if FFmpeg recording process is still running
                 if self.recording_process and self.recording_process.poll() is not None:
                     # FFmpeg died - capture stderr for diagnostics
-                    error_msg = f"❌ FFmpeg process died! Exit code: {self.recording_process.returncode}"
+                    exit_code = self.recording_process.returncode
+                    error_msg = f"❌ FFmpeg process died! Exit code: {exit_code}"
+                    yield self.log_progress(""), "\n".join(self.summaries)
+                    yield self.log_progress("="*60), "\n".join(self.summaries)
+                    yield self.log_progress(error_msg), "\n".join(self.summaries)
+                    yield self.log_progress(f"🔍 Cycle: {cycle_count}"), "\n".join(self.summaries)
+                    yield self.log_progress(f"🔍 Last segment index: {self.last_end_index}"), "\n".join(self.summaries)
+                    
+                    # Check what segments exist
+                    segments = list(segments_dir.glob('segment_*.mp4'))
+                    if segments:
+                        segment_list = sorted([seg.name for seg in segments])
+                        segment_sizes = [(seg.name, seg.stat().st_size / (1024*1024)) for seg in sorted(segments)]
+                        yield self.log_progress(f"🔍 Segments on disk: {len(segments)}"), "\n".join(self.summaries)
+                        for name, size in segment_sizes:
+                            yield self.log_progress(f"     {name}: {size:.2f} MB"), "\n".join(self.summaries)
+                    else:
+                        yield self.log_progress(f"� No segments found on disk"), "\n".join(self.summaries)
                     
                     # Try to get stderr output
+                    yield self.log_progress(""), "\n".join(self.summaries)
                     try:
                         if self.recording_process.stderr:
                             stderr_output = self.recording_process.stderr.read()
                             if stderr_output:
-                                # Get last 10 lines of error output
-                                error_lines = stderr_output.strip().split('\n')[-10:]
-                                yield self.log_progress(error_msg), "\n".join(self.summaries)
-                                yield self.log_progress("📋 FFmpeg error output:"), "\n".join(self.summaries)
+                                # Get last 20 lines of error output
+                                error_lines = stderr_output.strip().split('\n')[-20:]
+                                yield self.log_progress("📋 FFmpeg error output (last 20 lines):"), "\n".join(self.summaries)
                                 for line in error_lines:
                                     yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
                             else:
-                                yield self.log_progress(error_msg), "\n".join(self.summaries)
-                                yield self.log_progress("  (No error output captured)"), "\n".join(self.summaries)
-                    except:
-                        yield self.log_progress(error_msg), "\n".join(self.summaries)
+                                yield self.log_progress("📋 (No FFmpeg error output captured)"), "\n".join(self.summaries)
+                    except Exception as e:
+                        yield self.log_progress(f"📋 Error reading FFmpeg output: {e}"), "\n".join(self.summaries)
                     
                     # Common issue hints
                     yield self.log_progress(""), "\n".join(self.summaries)
