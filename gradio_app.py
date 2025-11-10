@@ -342,12 +342,29 @@ class LivestreamSummarizerGradio:
                 capture_output=True, text=True, timeout=30
             )
             if result.returncode != 0:
-                yield self.log_progress("❌ Failed to extract HLS URL"), ""
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                yield self.log_progress(f"❌ Failed to extract HLS URL"), ""
+                yield self.log_progress(f"   Error: {error_msg}"), ""
+                yield self.log_progress(f"   Make sure yt-dlp is installed and YouTube URL is valid"), ""
                 return
             hls_url = result.stdout.strip()
+            if not hls_url:
+                yield self.log_progress("❌ Empty HLS URL returned"), ""
+                yield self.log_progress("   The stream might not be live or URL is invalid"), ""
+                return
             yield self.log_progress(f"✅ HLS URL extracted"), ""
+            logger.info(f"HLS URL: {hls_url}")
+        except FileNotFoundError:
+            yield self.log_progress(f"❌ yt-dlp not found!"), ""
+            yield self.log_progress(f"   Install with: pip install yt-dlp"), ""
+            return
+        except subprocess.TimeoutExpired:
+            yield self.log_progress(f"❌ yt-dlp timed out after 30 seconds"), ""
+            yield self.log_progress(f"   Check your internet connection"), ""
+            return
         except Exception as e:
-            yield self.log_progress(f"❌ Error: {e}"), ""
+            yield self.log_progress(f"❌ Error extracting HLS URL: {e}"), ""
+            logger.error(f"HLS extraction error: {e}")
             return
         
         # Start recording
