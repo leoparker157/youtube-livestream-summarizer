@@ -81,19 +81,17 @@ class LivestreamSummarizerGradio:
         except:
             return False
     
-    def concatenate_segments(self, segments_dir, concat_file, compressed_file, num_segments):
+    def concatenate_segments(self, segments_dir, concat_file, compressed_file, segment_files):
         """Concatenate segments"""
-        segments = sorted(segments_dir.glob('segment_*.mp4'))
-        
-        if len(segments) < num_segments:
+        # Verify all segments exist
+        missing_segments = [seg for seg in segment_files if not seg.exists()]
+        if missing_segments:
+            logger.error(f"Missing segments: {[s.name for s in missing_segments]}")
             return False
         
-        # Get latest segments
-        latest_segments = segments[-num_segments:]
-        
-        # Create concat file
+        # Create concat file with specific segments
         with open(concat_file, 'w') as f:
-            for seg in latest_segments:
+            for seg in segment_files:
                 f.write(f"file '{seg}'\n")
         
         # Concatenate
@@ -163,15 +161,52 @@ class LivestreamSummarizerGradio:
             logger.error(f"Gemini error details: {e}")
             return None
     
-    def cleanup_old_segments(self, segments_dir, keep_count):
-        """Clean up old segments"""
-        segments = sorted(segments_dir.glob('segment_*.mp4'))
-        if len(segments) > keep_count:
-            for seg in segments[:-keep_count]:
+    def cleanup_old_segments(self, segments_dir, overlap_segments):
+        """Clean up old segments to prevent unlimited disk usage.
+        
+        Keeps only the most recent overlapping segments from previous cycles.
+        """
+        if self.last_end_index == -1:
+            # First cycle, nothing to clean yet
+            return
+
+        try:
+            # Give FFmpeg a moment to fully release file handles
+            time.sleep(2)
+            
+            segments = sorted(segments_dir.glob('segment_*.mp4'))
+            if not segments:
+                return
+
+            # Keep only segments from the overlap point onwards
+            keep_from_index = self.last_end_index - overlap_segments + 1
+            
+            segments_to_delete = []
+            for segment in segments:
+                # Extract segment number from filename (segment_XXX.mp4)
                 try:
-                    seg.unlink()
-                except:
-                    pass
+                    segment_num = int(segment.stem.split('_')[1])
+                    if segment_num < keep_from_index:
+                        segments_to_delete.append(segment)
+                except (ValueError, IndexError):
+                    logger.warning(f"Could not parse segment number from {segment.name}")
+                    continue
+
+            # Delete old segments
+            deleted_count = 0
+            for segment in segments_to_delete:
+                try:
+                    segment.unlink()
+                    logger.info(f"Cleaned up old segment: {segment.name}")
+                    deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to delete {segment.name}: {e}")
+
+            if deleted_count > 0:
+                self.log_progress(f"🧹 Deleted {deleted_count} old segments (keeping from index {keep_from_index})")
+
+        except Exception as e:
+            logger.warning(f"Error during segment cleanup: {e}")
     
     def run_summarizer(self, youtube_url, api_key, video_duration, segment_duration, 
                        overlap_segments, model_name, prompt_text, use_google_search, progress=gr.Progress()):
@@ -186,6 +221,24 @@ class LivestreamSummarizerGradio:
         segments_dir.mkdir(exist_ok=True)
         concat_file = segments_dir / "concat.txt"
         compressed_file = script_dir / "compressed.mp4"
+        
+        # Clean up old files before starting
+        yield self.log_progress("🧹 Cleaning up old files..."), ""
+        for file in segments_dir.glob("*"):
+            try:
+                file.unlink()
+                self.log_progress(f"  Deleted: {file.name}")
+            except Exception as e:
+                logger.warning(f"Could not delete {file.name}: {e}")
+        
+        if compressed_file.exists():
+            try:
+                compressed_file.unlink()
+                self.log_progress(f"  Deleted: {compressed_file.name}")
+            except Exception as e:
+                logger.warning(f"Could not delete {compressed_file.name}: {e}")
+        
+        yield self.log_progress("✅ Cleanup complete"), ""
         
         num_segments = video_duration // segment_duration
         
@@ -224,22 +277,53 @@ class LivestreamSummarizerGradio:
             while not self.should_stop:
                 # Check segments
                 segments = list(segments_dir.glob('segment_*.mp4'))
-                current_count = len(segments)
                 
-                if current_count >= num_segments and not self.processing:
+                # Calculate required max index for next cycle
+                can_process = False
+                if segments:
+                    try:
+                        max_index = max(int(seg.stem.split('_')[1]) for seg in segments if seg.stem.split('_')[1].isdigit())
+                        if self.last_end_index == -1:
+                            # First cycle: need at least num_segments
+                            required_max_index = num_segments - 1
+                        else:
+                            # Subsequent cycles: need num_segments beyond last overlap point
+                            required_max_index = self.last_end_index + num_segments - overlap_segments
+                        
+                        can_process = max_index >= required_max_index and not self.processing
+                        current_count = max_index + 1
+                    except ValueError:
+                        current_count = len(segments)
+                else:
+                    current_count = 0
+                
+                if can_process:
                     cycle_count += 1
                     self.processing = True
                     
-                    yield self.log_progress(f"📊 Cycle #{cycle_count}: Processing {num_segments} segments..."), "\n".join(self.summaries)
+                    # Determine segment range for this cycle
+                    if self.last_end_index == -1:
+                        # First cycle: use the latest num_segments
+                        start_index = max_index - num_segments + 1
+                        end_index = max_index
+                    else:
+                        # Subsequent cycles: start from overlap position
+                        start_index = max(0, self.last_end_index - overlap_segments + 1)
+                        end_index = start_index + num_segments - 1
+                    
+                    yield self.log_progress(f"📊 Cycle #{cycle_count}: Processing {num_segments} segments (indices {start_index}-{end_index})..."), "\n".join(self.summaries)
                     
                     # Get segment details
-                    segment_files = sorted(segments_dir.glob('segment_*.mp4'))[-num_segments:]
-                    total_size = sum(seg.stat().st_size for seg in segment_files) / (1024 * 1024)
+                    segment_files = [segments_dir / f"segment_{i:03d}.mp4" for i in range(start_index, end_index + 1)]
+                    total_size = sum(seg.stat().st_size for seg in segment_files if seg.exists()) / (1024 * 1024)
                     yield self.log_progress(f"📁 Using segments: {segment_files[0].name} to {segment_files[-1].name} ({total_size:.1f} MB)"), "\n".join(self.summaries)
                     
-                    # Concatenate
+                    # Update last_end_index for next cycle
+                    self.last_end_index = end_index
+                    
+                    # Concatenate specific segments for this cycle
                     yield self.log_progress("🔗 Concatenating segments..."), "\n".join(self.summaries)
-                    if self.concatenate_segments(segments_dir, concat_file, compressed_file, num_segments):
+                    if self.concatenate_segments(segments_dir, concat_file, compressed_file, segment_files):
                         final_size = compressed_file.stat().st_size / (1024 * 1024)
                         yield self.log_progress(f"✅ Concatenation complete ({final_size:.1f} MB)"), "\n".join(self.summaries)
                         
@@ -256,7 +340,7 @@ class LivestreamSummarizerGradio:
                         yield self.log_progress("🧹 Cleaning up temporary files..."), "\n".join(self.summaries)
                         if compressed_file.exists():
                             compressed_file.unlink()
-                        self.cleanup_old_segments(segments_dir, num_segments + 5)
+                        self.cleanup_old_segments(segments_dir, overlap_segments)
                         yield self.log_progress("✅ Cleanup complete"), "\n".join(self.summaries)
                     else:
                         yield self.log_progress("❌ Concatenation failed"), "\n".join(self.summaries)
