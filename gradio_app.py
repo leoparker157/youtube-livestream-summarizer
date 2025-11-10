@@ -635,7 +635,10 @@ class LivestreamSummarizerGradio:
                             current_size = current_segment.stat().st_size
                             size_mb = current_size / (1024 * 1024)
                             
-                            # Track segment size\n                            if current_size != self.last_segment_size:\n                                self.last_segment_size = current_size\n                            \n                            
+                            # Track segment size for debugging
+                            if current_size != self.last_segment_size:
+                                self.last_segment_size = current_size
+                            
                             # Show as "Finalizing" if we have valid max_index and it's the last segment needed
                             if max_index >= 0:
                                 if self.last_end_index == -1:
