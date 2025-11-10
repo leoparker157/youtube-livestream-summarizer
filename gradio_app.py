@@ -316,12 +316,11 @@ def create_interface():
                 model_name = gr.Dropdown(
                     label="Gemini Model",
                     choices=[
-                        "gemini-2.0-flash-exp",
-                        "gemini-2.5-pro",
                         "gemini-2.5-flash",
+                        "gemini-2.5-pro",
                         "gemini-2.5-flash-lite"
                     ],
-                    value="gemini-2.0-flash-exp",
+                    value="gemini-2.5-flash",
                     info="Choose the Gemini model for summarization"
                 )
                 
