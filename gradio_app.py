@@ -563,38 +563,6 @@ class LivestreamSummarizerGradio:
                     # Update last_end_index for next cycle
                     self.last_end_index = end_index
                     
-                    # Clean up old segments from previous cycle BEFORE processing new cycle (like main.py)
-                    # This ensures old segments are not in use when deleted
-                    if self.last_end_index != -1:
-                        yield self.log_progress("🧹 Cleaning up old segments from previous cycle..."), "\n".join(self.summaries)
-                        self.cleanup_old_segments(segments_dir, overlap_segments)
-                    
-                    # Determine segment range for this cycle
-                    if self.last_end_index == -1:
-                        # First cycle: use the latest num_segments
-                        start_index = max_index - num_segments + 1
-                        end_index = max_index
-                    else:
-                        # Subsequent cycles: start from overlap position
-                        start_index = max(0, self.last_end_index - overlap_segments + 1)
-                        end_index = start_index + num_segments - 1
-                    
-                    yield self.log_progress(f"📊 Cycle #{cycle_count}: Processing {num_segments} segments (indices {start_index}-{end_index})..."), "\n".join(self.summaries)
-                    
-                    # Get segment details
-                    segment_files = [segments_dir / f"segment_{i:03d}.mp4" for i in range(start_index, end_index + 1)]
-                    total_size = sum(seg.stat().st_size for seg in segment_files if seg.exists()) / (1024 * 1024)
-                    yield self.log_progress(f"📁 Using segments: {segment_files[0].name} to {segment_files[-1].name} ({total_size:.1f} MB)"), "\n".join(self.summaries)
-                    yield self.log_progress(f"📊 Cycle segments: indices {start_index} to {end_index} ({len(segment_files)} segments)"), "\n".join(self.summaries)
-                    
-                    # Update last_end_index for next cycle
-                    self.last_end_index = end_index
-                    
-                    # OPTIMIZATION: Wait for NEXT segment to start (proves all cycle segments are complete)
-                    next_segment_index = end_index + 1
-                    next_segment_path = segments_dir / f"segment_{next_segment_index:03d}.mp4"
-                    yield self.log_progress(f"⏳ Waiting for next segment {next_segment_path.name} to start (ensures cycle complete)..."), "\n".join(self.summaries)
-                    
                     wait_start = time.time()
                     wait_timeout = segment_duration * 2
                     last_size = 0
