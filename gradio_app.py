@@ -347,9 +347,26 @@ class LivestreamSummarizerGradio:
                     
                     self.processing = False
                 else:
-                    remaining = num_segments - current_count
-                    if remaining > 0:
-                        yield self.log_progress(f"⏳ Waiting for segments... ({current_count}/{num_segments})"), "\n".join(self.summaries)
+                    # Show waiting status with live file size update
+                    if segments:
+                        try:
+                            # Get the current segment being recorded (highest index)
+                            current_segment = max(segments, key=lambda s: int(s.stem.split('_')[1]))
+                            current_size = current_segment.stat().st_size
+                            size_mb = current_size / (1024 * 1024)
+                            
+                            # Calculate how many more segments needed
+                            if self.last_end_index == -1:
+                                # First cycle: show count toward num_segments
+                                yield self.log_progress(f"⏳ Waiting for segments... ({current_count}/{num_segments}) | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                            else:
+                                # Subsequent cycles: show index progress
+                                needed_index = self.last_end_index + num_segments - overlap_segments
+                                yield self.log_progress(f"⏳ Waiting for segment {needed_index}... (current: {max_index}) | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                        except (ValueError, OSError):
+                            yield self.log_progress(f"⏳ Waiting for segments..."), "\n".join(self.summaries)
+                    else:
+                        yield self.log_progress(f"⏳ Waiting for segments..."), "\n".join(self.summaries)
                 
                 time.sleep(5)
                 
