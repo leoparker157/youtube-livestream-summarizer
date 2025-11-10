@@ -635,46 +635,7 @@ class LivestreamSummarizerGradio:
                             current_size = current_segment.stat().st_size
                             size_mb = current_size / (1024 * 1024)
                             
-                            # STALL DETECTION: Check if segment is stuck at 0 MB or not growing
-                            stall_timeout = segment_duration * 3  # 3x segment duration to allow for network issues
-                            
-                            if current_size == 0 and size_mb == 0.0:
-                                if self.segment_stall_check_time is None:
-                                    # First time seeing 0 MB - start timer
-                                    self.segment_stall_check_time = time.time()
-                                elif time.time() - self.segment_stall_check_time > stall_timeout:
-                                    # Segment stuck at 0 MB for too long - restart FFmpeg
-                                    yield self.log_progress(f"🚨 CRITICAL: {current_segment.name} stuck at 0.0 MB for {int(time.time() - self.segment_stall_check_time)}s"), "\n".join(self.summaries)
-                                    yield self.log_progress("� Attempting to restart FFmpeg recording..."), "\n".join(self.summaries)
-                                    
-                                    # Try to restart FFmpeg
-                                    if self.restart_ffmpeg_recording(hls_url, segment_duration, segments_dir):
-                                        yield self.log_progress("✅ FFmpeg restarted - continuing recording"), "\n".join(self.summaries)
-                                    else:
-                                        yield self.log_progress("❌ FFmpeg restart failed - stopping"), "\n".join(self.summaries)
-                                        self.should_stop = True
-                                        break
-                            elif current_size > 0 and current_size == self.last_segment_size:
-                                # Segment size not changing - check if it's been too long
-                                if self.segment_stall_check_time is None:
-                                    self.segment_stall_check_time = time.time()
-                                elif time.time() - self.segment_stall_check_time > stall_timeout:
-                                    # Segment not growing - restart FFmpeg
-                                    yield self.log_progress(f"🚨 CRITICAL: {current_segment.name} stopped growing at {size_mb:.1f} MB"), "\n".join(self.summaries)
-                                    yield self.log_progress("🔄 Attempting to restart FFmpeg recording..."), "\n".join(self.summaries)
-                                    
-                                    if self.restart_ffmpeg_recording(hls_url, segment_duration, segments_dir):
-                                        yield self.log_progress("✅ FFmpeg restarted - continuing recording"), "\n".join(self.summaries)
-                                    else:
-                                        yield self.log_progress("❌ FFmpeg restart failed - stopping"), "\n".join(self.summaries)
-                                        self.should_stop = True
-                                        break
-                            else:
-                                # Segment is growing - reset stall detection
-                                if current_size != self.last_segment_size:
-                                    self.segment_stall_check_time = None
-                                    self.last_segment_size = current_size
-                            
+                            # Track segment size\n                            if current_size != self.last_segment_size:\n                                self.last_segment_size = current_size\n                            \n                            
                             # Show as "Finalizing" if we have valid max_index and it's the last segment needed
                             if max_index >= 0:
                                 if self.last_end_index == -1:
