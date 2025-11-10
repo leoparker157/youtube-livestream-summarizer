@@ -83,6 +83,7 @@ class LivestreamSummarizerGradio:
     
     def concatenate_segments(self, segments_dir, concat_file, compressed_file, segment_files):
         """Concatenate segments"""
+        
         # Verify all segments exist
         missing_segments = [seg for seg in segment_files if not seg.exists()]
         if missing_segments:
@@ -320,6 +321,39 @@ class LivestreamSummarizerGradio:
                     
                     # Update last_end_index for next cycle
                     self.last_end_index = end_index
+                    
+                    # OPTIMIZATION: Wait for NEXT segment to start (proves all cycle segments are complete)
+                    next_segment_index = end_index + 1
+                    next_segment_path = segments_dir / f"segment_{next_segment_index:03d}.mp4"
+                    yield self.log_progress(f"⏳ Waiting for next segment {next_segment_path.name} to start (ensures cycle complete)..."), "\n".join(self.summaries)
+                    
+                    wait_start = time.time()
+                    wait_timeout = segment_duration * 2
+                    last_size = 0
+                    segment_confirmed = False
+                    
+                    while time.time() - wait_start < wait_timeout:
+                        if next_segment_path.exists() and next_segment_path.stat().st_size > 0:
+                            yield self.log_progress(f"✅ Next segment {next_segment_path.name} started, cycle segments complete"), "\n".join(self.summaries)
+                            segment_confirmed = True
+                            break
+                        
+                        # Show last segment finalizing status
+                        last_segment_path = segments_dir / f"segment_{end_index:03d}.mp4"
+                        if last_segment_path.exists():
+                            try:
+                                current_size = last_segment_path.stat().st_size
+                                if current_size != last_size and current_size > 0:
+                                    last_size = current_size
+                                    size_mb = current_size / (1024 * 1024)
+                                    yield self.log_progress(f"� Finalizing: {last_segment_path.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                            except OSError:
+                                pass
+                        
+                        time.sleep(0.5)
+                    
+                    if not segment_confirmed:
+                        yield self.log_progress(f"⚠️ Timeout waiting for {next_segment_path.name}, proceeding anyway..."), "\n".join(self.summaries)
                     
                     # Concatenate specific segments for this cycle
                     yield self.log_progress("🔗 Concatenating segments..."), "\n".join(self.summaries)
