@@ -32,6 +32,8 @@ class LivestreamSummarizerGradio:
         self.ffmpeg_stderr = None  # Store FFmpeg stderr for debugging
         self.segment_stall_check_time = None  # Track when we first detected potential stall
         self.last_segment_size = 0  # Track segment size changes
+        self.ffmpeg_restart_count = 0  # Track how many times we've restarted FFmpeg
+        self.last_restart_time = 0  # Track when we last restarted
         self.processing = False
         self.should_stop = False
         self.last_end_index = -1
@@ -54,16 +56,60 @@ class LivestreamSummarizerGradio:
         self.summaries.append(summary_entry)
         return "\n".join(self.summaries)
     
-    def check_nvenc_available(self):
-        """Check if NVIDIA NVENC encoder is available"""
+    def restart_ffmpeg_recording(self, hls_url, segment_duration, segments_dir):
+        """Restart FFmpeg recording when it gets stuck"""
+        # Prevent infinite restart loops
+        max_restarts = 5
+        if self.ffmpeg_restart_count >= max_restarts:
+            self.log_progress(f"❌ Maximum restart limit ({max_restarts}) reached - stopping")
+            return False
+        
+        # Prevent restarting too frequently (minimum 30 seconds between restarts)
+        if time.time() - self.last_restart_time < 30:
+            self.log_progress("⏳ Waiting before restart attempt...")
+            time.sleep(5)
+        
         try:
+            # Stop current process if running
+            if self.recording_process and self.recording_process.poll() is None:
+                self.recording_process.terminate()
+                try:
+                    self.recording_process.wait(timeout=3)
+                except:
+                    self.recording_process.kill()
+                    self.recording_process.wait()
+            
+            # Increment restart counter
+            self.ffmpeg_restart_count += 1
+            self.last_restart_time = time.time()
+            
+            self.log_progress(f"🔄 Restarting FFmpeg (attempt #{self.ffmpeg_restart_count}/{max_restarts})...")
+            
+            # Start new recording process
+            self.start_recording(hls_url, segment_duration, segments_dir)
+            
+            # Reset stall detection
+            self.segment_stall_check_time = None
+            self.last_segment_size = 0
+            
+            self.log_progress("✅ FFmpeg restarted successfully")
+            return True
+            
+        except Exception as e:
+            self.log_progress(f"❌ Failed to restart FFmpeg: {e}")
+            return False
+    
+    def check_hls_stream_health(self, hls_url):
+        """Check if HLS stream is still accessible"""
+        try:
+            # Quick probe of the HLS stream
             result = subprocess.run(
-                ['ffmpeg', '-hide_banner', '-encoders'],
+                ['ffprobe', '-v', 'error', '-show_format', '-show_streams', hls_url],
                 capture_output=True,
                 text=True,
                 timeout=10
             )
-            return 'h264_nvenc' in result.stdout
+            return result.returncode == 0
         except:
             return False
     
@@ -95,6 +141,7 @@ class LivestreamSummarizerGradio:
         
         cmd = [
             'ffmpeg',
+            '-fflags', '+discardcorrupt+genpts+igndts',  # Handle corrupted packets, generate timestamps
             '-i', hls_url,
             '-f', 'segment',
             '-segment_time', str(segment_duration),
@@ -110,6 +157,7 @@ class LivestreamSummarizerGradio:
             '-c:a', 'aac',
             '-b:a', '64k',
             '-movflags', '+frag_keyframe+empty_moov',  # Use fragmented MP4 for segmented output
+            '-avoid_negative_ts', 'make_zero',  # Handle timestamp issues
             str(segments_dir / 'segment_%03d.mp4')
         ]
         
@@ -352,6 +400,8 @@ class LivestreamSummarizerGradio:
         self.new_summary_available = False  # Reset summary flag
         self.segment_stall_check_time = None  # Reset stall detection
         self.last_segment_size = 0  # Reset segment size tracking
+        self.ffmpeg_restart_count = 0  # Reset restart counter
+        self.last_restart_time = 0  # Reset restart time
         
         # Setup directories
         script_dir = Path.cwd()
@@ -592,25 +642,40 @@ class LivestreamSummarizerGradio:
                             current_size = current_segment.stat().st_size
                             size_mb = current_size / (1024 * 1024)
                             
-                            # STALL DETECTION: Check if segment is stuck at 0 MB
+                            # STALL DETECTION: Check if segment is stuck at 0 MB or not growing
+                            stall_timeout = segment_duration * 3  # 3x segment duration to allow for network issues
+                            
                             if current_size == 0 and size_mb == 0.0:
                                 if self.segment_stall_check_time is None:
                                     # First time seeing 0 MB - start timer
                                     self.segment_stall_check_time = time.time()
-                                elif time.time() - self.segment_stall_check_time > segment_duration * 2:
-                                    # Segment stuck at 0 MB for 2x segment duration - likely stalled
-                                    yield self.log_progress(f"⚠️ WARNING: {current_segment.name} stuck at 0.0 MB for {int(time.time() - self.segment_stall_check_time)}s"), "\n".join(self.summaries)
-                                    yield self.log_progress("💡 This usually means FFmpeg is stalled. Check:"), "\n".join(self.summaries)
-                                    yield self.log_progress("  1. Is the stream still live?"), "\n".join(self.summaries)
-                                    yield self.log_progress("  2. Is HLS URL still valid?"), "\n".join(self.summaries)
-                                    yield self.log_progress("  3. Network connection stable?"), "\n".join(self.summaries)
+                                elif time.time() - self.segment_stall_check_time > stall_timeout:
+                                    # Segment stuck at 0 MB for too long - restart FFmpeg
+                                    yield self.log_progress(f"🚨 CRITICAL: {current_segment.name} stuck at 0.0 MB for {int(time.time() - self.segment_stall_check_time)}s"), "\n".join(self.summaries)
+                                    yield self.log_progress("� Attempting to restart FFmpeg recording..."), "\n".join(self.summaries)
                                     
-                                    # Check if FFmpeg is actually still running
-                                    if self.recording_process and self.recording_process.poll() is None:
-                                        yield self.log_progress("  ℹ️ FFmpeg process is still running but not writing data"), "\n".join(self.summaries)
-                                    
-                                    # Reset timer to avoid spamming
+                                    # Try to restart FFmpeg
+                                    if self.restart_ffmpeg_recording(hls_url, segment_duration, segments_dir):
+                                        yield self.log_progress("✅ FFmpeg restarted - continuing recording"), "\n".join(self.summaries)
+                                    else:
+                                        yield self.log_progress("❌ FFmpeg restart failed - stopping"), "\n".join(self.summaries)
+                                        self.should_stop = True
+                                        break
+                            elif current_size > 0 and current_size == self.last_segment_size:
+                                # Segment size not changing - check if it's been too long
+                                if self.segment_stall_check_time is None:
                                     self.segment_stall_check_time = time.time()
+                                elif time.time() - self.segment_stall_check_time > stall_timeout:
+                                    # Segment not growing - restart FFmpeg
+                                    yield self.log_progress(f"🚨 CRITICAL: {current_segment.name} stopped growing at {size_mb:.1f} MB"), "\n".join(self.summaries)
+                                    yield self.log_progress("🔄 Attempting to restart FFmpeg recording..."), "\n".join(self.summaries)
+                                    
+                                    if self.restart_ffmpeg_recording(hls_url, segment_duration, segments_dir):
+                                        yield self.log_progress("✅ FFmpeg restarted - continuing recording"), "\n".join(self.summaries)
+                                    else:
+                                        yield self.log_progress("❌ FFmpeg restart failed - stopping"), "\n".join(self.summaries)
+                                        self.should_stop = True
+                                        break
                             else:
                                 # Segment is growing - reset stall detection
                                 if current_size != self.last_segment_size:
