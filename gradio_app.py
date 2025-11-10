@@ -85,7 +85,7 @@ class LivestreamSummarizerGradio:
             return False
     
     def concatenate_segments(self, segments_dir, concat_file, compressed_file, segment_files):
-        """Concatenate segments"""
+        """Concatenate segments with validation and retry logic (like main.py)"""
         
         # Verify all segments exist
         missing_segments = [seg for seg in segment_files if not seg.exists()]
@@ -93,22 +93,69 @@ class LivestreamSummarizerGradio:
             logger.error(f"Missing segments: {[s.name for s in missing_segments]}")
             return False
         
+        # Validate each segment
+        valid_segments = []
+        for seg in segment_files:
+            if self.validate_segment(seg):
+                valid_segments.append(seg)
+            else:
+                logger.warning(f"Invalid segment: {seg.name}")
+        
+        if len(valid_segments) != len(segment_files):
+            logger.warning(f"Some segments invalid. Expected {len(segment_files)}, got {len(valid_segments)}")
+            return False
+        
+        # Check for empty segments
+        empty_segments = [seg for seg in segment_files if seg.stat().st_size == 0]
+        if empty_segments:
+            logger.warning(f"Found {len(empty_segments)} empty segments: {[s.name for s in empty_segments]}")
+            return False
+        
+        # Log segment sizes
+        for seg in segment_files:
+            size = seg.stat().st_size
+            logger.info(f"Segment {seg.name}: {size} bytes")
+        
         # Create concat file with specific segments
         with open(concat_file, 'w') as f:
             for seg in segment_files:
                 f.write(f"file '{seg}'\n")
         
-        # Concatenate
-        cmd = [
-            'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-            '-i', str(concat_file), '-c', 'copy', str(compressed_file)
-        ]
+        logger.info(f"Concat file created: {concat_file}")
+        with open(concat_file, 'r') as f:
+            logger.info(f"Concat file contents:\n{f.read()}")
         
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            return result.returncode == 0
-        except:
-            return False
+        # Concatenate with retry logic (like main.py)
+        max_retries = 3
+        retry_delay = 120
+        
+        for attempt in range(1, max_retries + 1):
+            logger.info(f"Starting concatenation (attempt {attempt}/{max_retries})")
+            cmd = [
+                'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                '-i', str(concat_file), '-c', 'copy', str(compressed_file)
+            ]
+            
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                
+                if result.returncode == 0:
+                    logger.info(f"Concatenation completed successfully")
+                    return True
+                else:
+                    logger.warning(f"Concatenation attempt {attempt} failed: {result.stderr}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"FFmpeg concatenation timed out (attempt {attempt})")
+            except Exception as e:
+                logger.warning(f"Concatenation attempt {attempt} error: {e}")
+            
+            # Retry logic
+            if attempt < max_retries:
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+        
+        logger.error(f"Concatenation failed after {max_retries} attempts")
+        return False
     
     def summarize_with_gemini(self, compressed_file, api_key, prompt_text, model_name, use_google_search=False):
         """Send video to Gemini and get summary"""
@@ -375,6 +422,7 @@ class LivestreamSummarizerGradio:
                     segment_files = [segments_dir / f"segment_{i:03d}.mp4" for i in range(start_index, end_index + 1)]
                     total_size = sum(seg.stat().st_size for seg in segment_files if seg.exists()) / (1024 * 1024)
                     yield self.log_progress(f"📁 Using segments: {segment_files[0].name} to {segment_files[-1].name} ({total_size:.1f} MB)"), "\n".join(self.summaries)
+                    yield self.log_progress(f"📊 Cycle segments: indices {start_index} to {end_index} ({len(segment_files)} segments)"), "\n".join(self.summaries)
                     
                     # Update last_end_index for next cycle
                     self.last_end_index = end_index
