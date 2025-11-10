@@ -534,18 +534,49 @@ class LivestreamSummarizerGradio:
         except Exception as e:
             yield self.log_progress(f"❌ Error: {e}"), "\n".join(self.summaries)
         finally:
-            # Stop recording
-            if self.recording_process:
-                self.recording_process.terminate()
-                self.recording_process.wait()
-            yield self.log_progress("⏹️ Recording stopped"), "\n".join(self.summaries)
+            # Stop recording if still running
+            if self.recording_process and self.recording_process.poll() is None:
+                yield self.log_progress("⏹️ Stopping recording..."), "\n".join(self.summaries)
+                try:
+                    self.recording_process.terminate()
+                    self.recording_process.wait(timeout=5)
+                except:
+                    self.recording_process.kill()
+                    self.recording_process.wait()
+                yield self.log_progress("✅ Recording stopped"), "\n".join(self.summaries)
     
     def stop_recording(self):
         """Stop the recording process"""
         self.should_stop = True
+        
+        # Add to log
+        self.log_progress("🛑 Stop requested...")
+        
+        # Terminate FFmpeg process
         if self.recording_process:
-            self.recording_process.terminate()
-        return "Stopping..."
+            try:
+                self.log_progress("⏹️ Terminating FFmpeg recording...")
+                self.recording_process.terminate()
+                
+                # Wait for process to end (with timeout)
+                try:
+                    self.recording_process.wait(timeout=5)
+                    self.log_progress("✅ FFmpeg process terminated")
+                except:
+                    # If it doesn't terminate, force kill
+                    self.log_progress("⚠️ Force killing FFmpeg process...")
+                    self.recording_process.kill()
+                    self.recording_process.wait()
+                    self.log_progress("✅ FFmpeg process killed")
+            except Exception as e:
+                self.log_progress(f"❌ Error stopping FFmpeg: {e}")
+        else:
+            self.log_progress("⚠️ No recording process found")
+        
+        self.log_progress("✅ Stop complete")
+        
+        # Return current progress log
+        return "\n".join(self.progress_log)
 
 # Create Gradio interface
 def create_interface():
