@@ -154,23 +154,18 @@ class LivestreamSummarizerGradio:
         
         cmd = [
             'ffmpeg',
-            '-fflags', '+discardcorrupt+genpts+igndts',  # Handle corrupted packets, generate timestamps
             '-i', hls_url,
             '-f', 'segment',
             '-segment_time', str(segment_duration),
-            '-segment_format', 'mp4',  # Explicitly specify MP4 format for segments
             '-segment_wrap', '0',  # Never wrap segment numbers (allows unlimited segments)
             '-reset_timestamps', '1',  # Reset timestamps for each segment
-            '-break_non_keyframes', '1',  # Allow breaking at non-keyframes for exact timing
             '-c:v', video_codec,
             '-preset', codec_preset,
         ] + codec_options + [
             '-vf', 'scale=-2:720,fps=30',
-            '-g', '60',  # Force keyframe every 60 frames (2s at 30fps) for reliable segmentation
             '-c:a', 'aac',
             '-b:a', '64k',
-            '-movflags', '+frag_keyframe+empty_moov',  # Use fragmented MP4 for segmented output
-            '-avoid_negative_ts', 'make_zero',  # Handle timestamp issues
+            '-movflags', '+faststart',
             str(segments_dir / 'segment_%03d.mp4')
         ]
         
