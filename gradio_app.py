@@ -540,37 +540,13 @@ class LivestreamSummarizerGradio:
                     
                     yield self.log_progress(f"📊 Cycle segments: indices {start_index} to {end_index} ({num_segments} segments)"), "\n".join(self.summaries)
                     
-                    # OPTIMIZATION: Wait for NEXT segment to start (proves all cycle segments are complete)
-                    # This is the KEY logic from main.py
+                    # Just check if next segment exists (non-blocking) - recording continues
                     next_segment_index = end_index + 1
                     next_segment_path = segments_dir / f"segment_{next_segment_index:03d}.mp4"
-                    yield self.log_progress(f"⏳ Waiting for next segment {next_segment_path.name} to start..."), "\n".join(self.summaries)
-                    
-                    wait_start = time.time()
-                    wait_timeout = segment_duration * 2
-                    last_size = 0
-                    
-                    while time.time() - wait_start < wait_timeout:
-                        if next_segment_path.exists() and next_segment_path.stat().st_size > 0:
-                            yield self.log_progress(f"✅ Next segment {next_segment_path.name} started, cycle segments complete"), "\n".join(self.summaries)
-                            break
-                        
-                        # Show last segment finalizing status
-                        last_segment_path = segments_dir / f"segment_{end_index:03d}.mp4"
-                        if last_segment_path.exists():
-                            try:
-                                current_size = last_segment_path.stat().st_size
-                                if current_size != last_size and current_size > 0:
-                                    last_size = current_size
-                                    size_mb = current_size / (1024 * 1024)
-                                    yield self.log_progress(f"🔄 Finalizing: {last_segment_path.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
-                            except OSError:
-                                pass
-                        
-                        time.sleep(0.5)
+                    if next_segment_path.exists() and next_segment_path.stat().st_size > 0:
+                        yield self.log_progress(f"✅ Next segment {next_segment_path.name} started, cycle segments complete"), "\n".join(self.summaries)
                     else:
-                        # Timeout - proceed anyway but log warning
-                        yield self.log_progress(f"⚠️ Timeout waiting for {next_segment_path.name}, proceeding..."), "\n".join(self.summaries)
+                        yield self.log_progress(f"� Recording continues: {next_segment_path.name} will start soon"), "\n".join(self.summaries)
                     
                     # Get segment files for concatenation
                     segment_files = [segments_dir / f"segment_{i:03d}.mp4" for i in range(start_index, end_index + 1)]
