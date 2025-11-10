@@ -34,6 +34,7 @@ class LivestreamSummarizerGradio:
         self.last_end_index = -1
         self.progress_log = []
         self.summaries = []
+        self.new_summary_available = False  # Flag for background thread updates
         
     def log_progress(self, message):
         """Add message to progress log"""
@@ -161,6 +162,43 @@ class LivestreamSummarizerGradio:
             self.log_progress(f"❌ Gemini error: {error_msg}")
             logger.error(f"Gemini error details: {e}")
             return None
+    
+    def _background_summarization(self, params):
+        """Background thread for Gemini summarization (keeps recording running)"""
+        try:
+            compressed_file = params['compressed_file']
+            api_key = params['api_key']
+            prompt_text = params['prompt_text']
+            model_name = params['model_name']
+            use_google_search = params['use_google_search']
+            cycle_count = params['cycle_count']
+            segments_dir = params['segments_dir']
+            overlap_segments = params['overlap_segments']
+            
+            self.log_progress("🤖 Sending to Gemini AI (background)...")
+            summary = self.summarize_with_gemini(compressed_file, api_key, prompt_text, model_name, use_google_search)
+            
+            if summary:
+                self.log_progress(f"✅ Summary #{cycle_count} received")
+                self.add_summary(summary)
+                self.new_summary_available = True  # Signal new summary to main loop
+            else:
+                self.log_progress("❌ Summary generation failed")
+            
+            # Cleanup
+            self.log_progress("🧹 Cleaning up temporary files (background)...")
+            try:
+                if compressed_file.exists():
+                    compressed_file.unlink()
+            except Exception as e:
+                logger.warning(f"Failed to delete {compressed_file}: {e}")
+            
+            self.cleanup_old_segments(segments_dir, overlap_segments)
+            self.log_progress("✅ Cleanup complete")
+            
+        except Exception as e:
+            self.log_progress(f"❌ Background summarization error: {e}")
+            logger.error(f"Background error: {e}")
     
     def cleanup_old_segments(self, segments_dir, overlap_segments):
         """Clean up old segments to prevent unlimited disk usage.
@@ -356,30 +394,37 @@ class LivestreamSummarizerGradio:
                     if not segment_confirmed:
                         yield self.log_progress(f"⚠️ Timeout waiting for {next_segment_path.name}, proceeding anyway..."), "\n".join(self.summaries)
                     
-                    # Concatenate specific segments for this cycle
+                    # Concatenate and start background processing (like main.py)
                     yield self.log_progress("🔗 Concatenating segments..."), "\n".join(self.summaries)
                     if self.concatenate_segments(segments_dir, concat_file, compressed_file, segment_files):
                         final_size = compressed_file.stat().st_size / (1024 * 1024)
                         yield self.log_progress(f"✅ Concatenation complete ({final_size:.1f} MB)"), "\n".join(self.summaries)
                         
-                        # Summarize
-                        yield self.log_progress("🤖 Sending to Gemini AI..."), "\n".join(self.summaries)
-                        summary = self.summarize_with_gemini(compressed_file, api_key, prompt_text, model_name, use_google_search)
+                        # Start background summarization thread (keeps recording running)
+                        yield self.log_progress("🚀 Starting background summarization (recording continues)..."), "\n".join(self.summaries)
                         
-                        if summary:
-                            yield self.log_progress(f"✅ Summary #{cycle_count} received"), self.add_summary(summary)
-                        else:
-                            yield self.log_progress("❌ Summary generation failed"), "\n".join(self.summaries)
+                        # Store parameters for background thread
+                        bg_params = {
+                            'compressed_file': compressed_file,
+                            'api_key': api_key,
+                            'prompt_text': prompt_text,
+                            'model_name': model_name,
+                            'use_google_search': use_google_search,
+                            'cycle_count': cycle_count,
+                            'segments_dir': segments_dir,
+                            'overlap_segments': overlap_segments
+                        }
                         
-                        # Cleanup
-                        yield self.log_progress("🧹 Cleaning up temporary files..."), "\n".join(self.summaries)
-                        if compressed_file.exists():
-                            compressed_file.unlink()
-                        self.cleanup_old_segments(segments_dir, overlap_segments)
-                        yield self.log_progress("✅ Cleanup complete"), "\n".join(self.summaries)
+                        # Start background thread
+                        bg_thread = threading.Thread(target=self._background_summarization, args=(bg_params,))
+                        bg_thread.daemon = True
+                        bg_thread.start()
+                        
+                        yield self.log_progress("✅ Summarization running in background"), "\n".join(self.summaries)
                     else:
                         yield self.log_progress("❌ Concatenation failed"), "\n".join(self.summaries)
                     
+                    # Release processing flag immediately so next cycle can start
                     self.processing = False
                 else:
                     # Show waiting status with live file size update like main.py
@@ -407,6 +452,12 @@ class LivestreamSummarizerGradio:
                             yield self.log_progress(f"⏳ Waiting for segments..."), "\n".join(self.summaries)
                     else:
                         yield self.log_progress(f"⏳ Waiting for segments..."), "\n".join(self.summaries)
+                
+                # Check if background thread completed a summary
+                if self.new_summary_available:
+                    self.new_summary_available = False
+                    # Force update of summaries panel
+                    yield "\n".join(self.progress_log), "\n".join(self.summaries)
                 
                 time.sleep(5)
                 
