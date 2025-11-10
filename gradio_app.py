@@ -108,7 +108,7 @@ class LivestreamSummarizerGradio:
         except:
             return False
     
-    def summarize_with_gemini(self, compressed_file, api_key, prompt_text, use_google_search=False):
+    def summarize_with_gemini(self, compressed_file, api_key, prompt_text, model_name, use_google_search=False):
         """Send video to Gemini and get summary"""
         try:
             client = genai.Client(api_key=api_key)
@@ -135,15 +135,15 @@ class LivestreamSummarizerGradio:
             
             # Generate summary with optional Google Search
             if use_google_search:
-                self.log_progress("🔍 Generating summary with Google Search enabled...")
+                self.log_progress(f"🔍 Generating summary with {model_name} (Google Search enabled)...")
                 grounding_tool = types.Tool(google_search=types.GoogleSearch())
                 config = types.GenerateContentConfig(tools=[grounding_tool])
             else:
-                self.log_progress("🤖 Generating summary...")
+                self.log_progress(f"🤖 Generating summary with {model_name}...")
                 config = types.GenerateContentConfig()
             
             response = client.models.generate_content(
-                model='gemini-2.0-flash-exp',
+                model=model_name,
                 contents=[
                     types.Part.from_text(text=prompt_text),
                     types.Part.from_uri(file_uri=video_file.uri, mime_type=video_file.mime_type)
@@ -174,7 +174,7 @@ class LivestreamSummarizerGradio:
                     pass
     
     def run_summarizer(self, youtube_url, api_key, video_duration, segment_duration, 
-                       overlap_segments, prompt_text, use_google_search, progress=gr.Progress()):
+                       overlap_segments, model_name, prompt_text, use_google_search, progress=gr.Progress()):
         """Main summarization loop"""
         self.should_stop = False
         self.progress_log = []
@@ -190,6 +190,7 @@ class LivestreamSummarizerGradio:
         num_segments = video_duration // segment_duration
         
         yield self.log_progress(f"⚙️ Configuration: {video_duration}s clips, {segment_duration}s segments, {num_segments} segments per cycle"), ""
+        yield self.log_progress(f"🤖 Model: {model_name} | Google Search: {'Enabled' if use_google_search else 'Disabled'}"), ""
         
         # Extract HLS URL
         yield self.log_progress("🔍 Extracting HLS URL from YouTube..."), ""
@@ -244,7 +245,7 @@ class LivestreamSummarizerGradio:
                         
                         # Summarize
                         yield self.log_progress("🤖 Sending to Gemini AI..."), "\n".join(self.summaries)
-                        summary = self.summarize_with_gemini(compressed_file, api_key, prompt_text, use_google_search)
+                        summary = self.summarize_with_gemini(compressed_file, api_key, prompt_text, model_name, use_google_search)
                         
                         if summary:
                             yield self.log_progress(f"✅ Summary #{cycle_count} received"), self.add_summary(summary)
@@ -310,6 +311,18 @@ def create_interface():
                     placeholder="Enter your Gemini API key",
                     type="password",
                     value=os.getenv('GEMINI_API_KEY', '')
+                )
+                
+                model_name = gr.Dropdown(
+                    label="Gemini Model",
+                    choices=[
+                        "gemini-2.0-flash-exp",
+                        "gemini-2.5-pro",
+                        "gemini-2.5-flash",
+                        "gemini-2.5-flash-lite"
+                    ],
+                    value="gemini-2.0-flash-exp",
+                    info="Choose the Gemini model for summarization"
                 )
                 
                 with gr.Accordion("⚙️ Advanced Settings", open=False):
@@ -399,7 +412,7 @@ def create_interface():
         # Event handlers
         start_btn.click(
             fn=summarizer.run_summarizer,
-            inputs=[youtube_url, api_key, video_duration, segment_duration, overlap_segments, prompt_text, use_google_search],
+            inputs=[youtube_url, api_key, video_duration, segment_duration, overlap_segments, model_name, prompt_text, use_google_search],
             outputs=[progress_output, summary_output]
         )
         
