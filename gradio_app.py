@@ -56,48 +56,7 @@ class LivestreamSummarizerGradio:
         self.summaries.append(summary_entry)
         return "\n".join(self.summaries)
     
-    def restart_ffmpeg_recording(self, hls_url, segment_duration, segments_dir):
-        """Restart FFmpeg recording when it gets stuck"""
-        # Prevent infinite restart loops
-        max_restarts = 5
-        if self.ffmpeg_restart_count >= max_restarts:
-            self.log_progress(f"❌ Maximum restart limit ({max_restarts}) reached - stopping")
-            return False
-        
-        # Prevent restarting too frequently (minimum 30 seconds between restarts)
-        if time.time() - self.last_restart_time < 30:
-            self.log_progress("⏳ Waiting before restart attempt...")
-            time.sleep(5)
-        
-        try:
-            # Stop current process if running
-            if self.recording_process and self.recording_process.poll() is None:
-                self.recording_process.terminate()
-                try:
-                    self.recording_process.wait(timeout=3)
-                except:
-                    self.recording_process.kill()
-                    self.recording_process.wait()
-            
-            # Increment restart counter
-            self.ffmpeg_restart_count += 1
-            self.last_restart_time = time.time()
-            
-            self.log_progress(f"🔄 Restarting FFmpeg (attempt #{self.ffmpeg_restart_count}/{max_restarts})...")
-            
-            # Start new recording process
-            self.start_recording(hls_url, segment_duration, segments_dir)
-            
-            # Reset stall detection
-            self.segment_stall_check_time = None
-            self.last_segment_size = 0
-            
-            self.log_progress("✅ FFmpeg restarted successfully")
-            return True
-            
-        except Exception as e:
-            self.log_progress(f"❌ Failed to restart FFmpeg: {e}")
-            return False
+
     
     def check_hls_stream_health(self, hls_url):
         """Check if HLS stream is still accessible"""
@@ -127,7 +86,7 @@ class LivestreamSummarizerGradio:
             return False
     
     def start_recording(self, hls_url, segment_duration, segments_dir):
-        """Start FFmpeg recording with GPU detection and error capture"""
+        """Start FFmpeg recording - EXACTLY matches main.py"""
         
         # Check for NVENC availability
         has_nvenc = self.check_nvenc_available()
@@ -152,13 +111,14 @@ class LivestreamSummarizerGradio:
                 '-bufsize', '1000k'
             ]
         
+        # FFmpeg command - EXACTLY as in main.py
         cmd = [
             'ffmpeg',
             '-i', hls_url,
             '-f', 'segment',
             '-segment_time', str(segment_duration),
-            '-segment_wrap', '0',  # Never wrap segment numbers (allows unlimited segments)
-            '-reset_timestamps', '1',  # Reset timestamps for each segment
+            '-segment_wrap', '0',
+            '-reset_timestamps', '1',
             '-c:v', video_codec,
             '-preset', codec_preset,
         ] + codec_options + [
@@ -169,14 +129,9 @@ class LivestreamSummarizerGradio:
             str(segments_dir / 'segment_%03d.mp4')
         ]
         
-        # Capture stderr for error diagnosis
-        self.recording_process = subprocess.Popen(
-            cmd, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            bufsize=1
-        )
+        self.log_progress(f"⚙️ FFmpeg: 720p H.264 @ 500k CBR + 64k audio")
+        # Use DEVNULL like main.py (not capturing stderr)
+        self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(5)
     
     def validate_segment(self, segment_path):
@@ -550,6 +505,63 @@ class LivestreamSummarizerGradio:
                     self.processing = True
                     
                     yield self.log_progress(f"📊 Cycle #{cycle_count}: Starting..."), "\n".join(self.summaries)
+                    
+                    # Clean up old segments from previous cycle BEFORE processing new cycle
+                    if self.last_end_index != -1:
+                        yield self.log_progress("🧹 Cleaning up old segments from previous cycle..."), "\n".join(self.summaries)
+                        self.cleanup_old_segments(segments_dir, overlap_segments)
+                    
+                    # Determine segment range for this cycle (EXACTLY like main.py)
+                    if self.last_end_index == -1:
+                        # First cycle: use the latest num_segments
+                        start_index = max_index - num_segments + 1
+                        end_index = max_index
+                    else:
+                        # Subsequent cycles: start from overlap position
+                        start_index = max(0, self.last_end_index - overlap_segments + 1)
+                        end_index = start_index + num_segments - 1
+                    
+                    yield self.log_progress(f"📊 Cycle segments: indices {start_index} to {end_index} ({num_segments} segments)"), "\n".join(self.summaries)
+                    
+                    # OPTIMIZATION: Wait for NEXT segment to start (proves all cycle segments are complete)
+                    # This is the KEY logic from main.py
+                    next_segment_index = end_index + 1
+                    next_segment_path = segments_dir / f"segment_{next_segment_index:03d}.mp4"
+                    yield self.log_progress(f"⏳ Waiting for next segment {next_segment_path.name} to start..."), "\n".join(self.summaries)
+                    
+                    wait_start = time.time()
+                    wait_timeout = segment_duration * 2
+                    last_size = 0
+                    
+                    while time.time() - wait_start < wait_timeout:
+                        if next_segment_path.exists() and next_segment_path.stat().st_size > 0:
+                            yield self.log_progress(f"✅ Next segment {next_segment_path.name} started, cycle segments complete"), "\n".join(self.summaries)
+                            break
+                        
+                        # Show last segment finalizing status
+                        last_segment_path = segments_dir / f"segment_{end_index:03d}.mp4"
+                        if last_segment_path.exists():
+                            try:
+                                current_size = last_segment_path.stat().st_size
+                                if current_size != last_size and current_size > 0:
+                                    last_size = current_size
+                                    size_mb = current_size / (1024 * 1024)
+                                    yield self.log_progress(f"🔄 Finalizing: {last_segment_path.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                            except OSError:
+                                pass
+                        
+                        time.sleep(0.5)
+                    else:
+                        # Timeout - proceed anyway but log warning
+                        yield self.log_progress(f"⚠️ Timeout waiting for {next_segment_path.name}, proceeding..."), "\n".join(self.summaries)
+                    
+                    # Get segment files for concatenation
+                    segment_files = [segments_dir / f"segment_{i:03d}.mp4" for i in range(start_index, end_index + 1)]
+                    total_size = sum(seg.stat().st_size for seg in segment_files if seg.exists()) / (1024 * 1024)
+                    yield self.log_progress(f"📁 Using segments: {segment_files[0].name} to {segment_files[-1].name} ({total_size:.1f} MB)"), "\n".join(self.summaries)
+                    
+                    # Update last_end_index for next cycle
+                    self.last_end_index = end_index
                     
                     # Clean up old segments from previous cycle BEFORE processing new cycle (like main.py)
                     # This ensures old segments are not in use when deleted
