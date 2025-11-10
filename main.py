@@ -834,41 +834,18 @@ def main():
                 stream_name = "stream"
         
         try:
-            # Try with browser cookies first (helps bypass "Sign in to confirm you're not a bot")
             result = subprocess.run(
-                ['yt-dlp', '-f', 'best', '-g', '--cookies-from-browser', 'chrome', url],
+                ['yt-dlp', '-f', 'best', '-g', url],
                 capture_output=True, 
                 text=True,
                 timeout=30
             )
-            
-            # If cookies failed, try without
-            if result.returncode != 0:
-                print("⚠️ Cookie extraction failed, trying without cookies...")
-                result = subprocess.run(
-                    ['yt-dlp', '-f', 'best', '-g', url],
-                    capture_output=True, 
-                    text=True,
-                    timeout=30
-                )
-            
             if result.returncode == 0 and result.stdout.strip():
                 hls_url = result.stdout.strip()
                 print(f"Got HLS URL: {hls_url}")
             else:
-                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                print(f"❌ Failed to extract HLS URL from YouTube")
-                
-                # Check if it's a bot detection error
-                if "Sign in to confirm" in error_msg or "not a bot" in error_msg:
-                    print("⚠️ YouTube detected automation and requires login")
-                    print("💡 Solutions:")
-                    print("   1. Make sure you're logged into YouTube in Chrome")
-                    print("   2. Try a different browser: Edge (--cookies-from-browser edge), Firefox, etc.")
-                    print("   3. Update yt-dlp: pip install -U yt-dlp")
-                else:
-                    print(f"Error: {error_msg}")
-                    print("Make sure yt-dlp is installed and the YouTube URL is valid.")
+                print(f"❌ Failed to extract HLS URL from YouTube: {result.stderr}")
+                print("Make sure yt-dlp is installed and the YouTube URL is valid.")
                 sys.exit(1)
         except FileNotFoundError:
             print("❌ yt-dlp not found. Install yt-dlp with: pip install yt-dlp")
