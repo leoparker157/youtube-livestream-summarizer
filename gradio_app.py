@@ -406,15 +406,34 @@ class LivestreamSummarizerGradio:
         yield self.log_progress("🔍 Extracting HLS URL from YouTube..."), ""
         
         try:
+            # Try with browser cookies first (helps bypass "Sign in to confirm you're not a bot")
             result = subprocess.run(
-                ['yt-dlp', '-f', 'best', '-g', youtube_url],
+                ['yt-dlp', '-f', 'best', '-g', '--cookies-from-browser', 'chrome', youtube_url],
                 capture_output=True, text=True, timeout=30
             )
+            
+            # If cookies failed, try without (might work for some streams)
+            if result.returncode != 0:
+                yield self.log_progress("⚠️ Cookie extraction failed, trying without cookies..."), ""
+                result = subprocess.run(
+                    ['yt-dlp', '-f', 'best', '-g', youtube_url],
+                    capture_output=True, text=True, timeout=30
+                )
+            
             if result.returncode != 0:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
                 yield self.log_progress(f"❌ Failed to extract HLS URL"), ""
-                yield self.log_progress(f"   Error: {error_msg}"), ""
-                yield self.log_progress(f"   Make sure yt-dlp is installed and YouTube URL is valid"), ""
+                
+                # Check if it's a bot detection error
+                if "Sign in to confirm" in error_msg or "not a bot" in error_msg:
+                    yield self.log_progress(f"   ⚠️ YouTube detected automation and requires login"), ""
+                    yield self.log_progress(f"   💡 Solutions:"), ""
+                    yield self.log_progress(f"      1. Make sure you're logged into YouTube in Chrome"), ""
+                    yield self.log_progress(f"      2. Try a different browser: Edge, Firefox, etc."), ""
+                    yield self.log_progress(f"      3. Update yt-dlp: pip install -U yt-dlp"), ""
+                else:
+                    yield self.log_progress(f"   Error: {error_msg}"), ""
+                    yield self.log_progress(f"   Make sure yt-dlp is installed and YouTube URL is valid"), ""
                 return
             hls_url = result.stdout.strip()
             if not hls_url:
