@@ -172,8 +172,6 @@ class LivestreamSummarizerGradio:
             model_name = params['model_name']
             use_google_search = params['use_google_search']
             cycle_count = params['cycle_count']
-            segments_dir = params['segments_dir']
-            overlap_segments = params['overlap_segments']
             
             self.log_progress("🤖 Sending to Gemini AI (background)...")
             summary = self.summarize_with_gemini(compressed_file, api_key, prompt_text, model_name, use_google_search)
@@ -185,16 +183,15 @@ class LivestreamSummarizerGradio:
             else:
                 self.log_progress("❌ Summary generation failed")
             
-            # Cleanup
-            self.log_progress("🧹 Cleaning up temporary files (background)...")
+            # Cleanup compressed file only (segments are cleaned before next cycle)
+            self.log_progress("🧹 Cleaning up compressed video file...")
             try:
                 if compressed_file.exists():
                     compressed_file.unlink()
+                    self.log_progress("✅ Compressed file deleted")
             except Exception as e:
                 logger.warning(f"Failed to delete {compressed_file}: {e}")
-            
-            self.cleanup_old_segments(segments_dir, overlap_segments)
-            self.log_progress("✅ Cleanup complete")
+                self.log_progress(f"⚠️ Could not delete compressed file: {e}")
             
         except Exception as e:
             self.log_progress(f"❌ Background summarization error: {e}")
@@ -347,6 +344,14 @@ class LivestreamSummarizerGradio:
                     cycle_count += 1
                     self.processing = True
                     
+                    yield self.log_progress(f"📊 Cycle #{cycle_count}: Starting..."), "\n".join(self.summaries)
+                    
+                    # Clean up old segments from previous cycle BEFORE processing new cycle (like main.py)
+                    # This ensures old segments are not in use when deleted
+                    if self.last_end_index != -1:
+                        yield self.log_progress("🧹 Cleaning up old segments from previous cycle..."), "\n".join(self.summaries)
+                        self.cleanup_old_segments(segments_dir, overlap_segments)
+                    
                     # Determine segment range for this cycle
                     if self.last_end_index == -1:
                         # First cycle: use the latest num_segments
@@ -416,9 +421,7 @@ class LivestreamSummarizerGradio:
                             'prompt_text': prompt_text,
                             'model_name': model_name,
                             'use_google_search': use_google_search,
-                            'cycle_count': cycle_count,
-                            'segments_dir': segments_dir,
-                            'overlap_segments': overlap_segments
+                            'cycle_count': cycle_count
                         }
                         
                         # Start background thread
