@@ -160,19 +160,8 @@ The web interface provides an intuitive way to configure and monitor livestream 
 - Monitor disk usage for long sessions
 - Session may timeout - save important summaries
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature-name`
-3. Make your changes and test thoroughly
-4. Commit your changes: `git commit -am 'Add feature'`
-5. Push to the branch: `git push origin feature-name`
-6. Submit a pull request
-
 ## License
-
 MIT License - see LICENSE file for details
-
 ## Links
 - **Google AI Studio**: [Get API Key](https://aistudio.google.com/app/apikey)
 - **Gemini API Docs**: [Google Generative AI](https://ai.google.dev/)
