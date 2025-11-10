@@ -140,6 +140,53 @@ class LivestreamSummarizerGradio:
         self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         time.sleep(5)
     
+    def restart_ffmpeg(self, segment_duration, segments_dir):
+        """Restart FFmpeg recording after detecting stall"""
+        try:
+            # Kill old process
+            if self.recording_process and self.recording_process.poll() is None:
+                self.log_progress("⏹️ Terminating stalled FFmpeg process...")
+                try:
+                    self.recording_process.terminate()
+                    self.recording_process.wait(timeout=5)
+                except:
+                    self.recording_process.kill()
+                    self.recording_process.wait()
+            
+            # Wait a moment before restarting
+            time.sleep(2)
+            
+            # Re-extract HLS URL (might have expired)
+            self.log_progress("🔄 Re-extracting fresh HLS URL from YouTube...")
+            result = subprocess.run(
+                ['yt-dlp', '-f', 'best', '-g', self.youtube_url],
+                capture_output=True, text=True, timeout=30
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                new_hls_url = result.stdout.strip()
+                self.log_progress("✅ Got fresh HLS URL")
+            else:
+                self.log_progress("❌ Could not extract fresh HLS URL")
+                return False
+            
+            # Restart recording
+            self.log_progress("🎬 Restarting FFmpeg recording...")
+            self.start_recording(new_hls_url, segment_duration, segments_dir)
+            
+            self.ffmpeg_restart_count += 1
+            self.last_restart_time = time.time()
+            self.segment_stall_check_time = None  # Reset stall detection
+            self.last_segment_size = 0
+            
+            self.log_progress(f"✅ FFmpeg restarted (restart #{self.ffmpeg_restart_count})")
+            return True
+            
+        except Exception as e:
+            self.log_progress(f"❌ FFmpeg restart failed: {e}")
+            logger.error(f"Restart error: {e}")
+            return False
+    
     def validate_segment(self, segment_path):
         """Validate segment file"""
         try:
@@ -371,6 +418,7 @@ class LivestreamSummarizerGradio:
         self.last_segment_size = 0  # Reset segment size tracking
         self.ffmpeg_restart_count = 0  # Reset restart counter
         self.last_restart_time = 0  # Reset restart time
+        self.youtube_url = youtube_url  # Store for FFmpeg restart
         
         # Setup directories
         script_dir = Path.cwd()
@@ -635,8 +683,35 @@ class LivestreamSummarizerGradio:
                             current_size = current_segment.stat().st_size
                             size_mb = current_size / (1024 * 1024)
                             
-                            # Track segment size for debugging
-                            if current_size != self.last_segment_size:
+                            # FILE GROWTH DETECTION: Check if segment file stopped growing
+                            if current_size == self.last_segment_size:
+                                # File size hasn't changed
+                                if self.segment_stall_check_time is None:
+                                    # First time detecting no growth - start timer
+                                    self.segment_stall_check_time = time.time()
+                                elif time.time() - self.segment_stall_check_time >= 3:
+                                    # File hasn't grown for 3+ seconds - RESTART FFmpeg
+                                    stall_duration = int(time.time() - self.segment_stall_check_time)
+                                    yield self.log_progress(f"🚨 STALL DETECTED: {current_segment.name} not growing for {stall_duration}s at {size_mb:.1f} MB"), "\n".join(self.summaries)
+                                    
+                                    # Prevent restart spam (max 1 restart per 30 seconds)
+                                    if time.time() - self.last_restart_time < 30:
+                                        yield self.log_progress(f"⚠️ Skipping restart (last restart was {int(time.time() - self.last_restart_time)}s ago)"), "\n".join(self.summaries)
+                                    else:
+                                        yield self.log_progress("🔄 Attempting to restart FFmpeg..."), "\n".join(self.summaries)
+                                        
+                                        if self.restart_ffmpeg(segment_duration, segments_dir):
+                                            yield self.log_progress("✅ FFmpeg restarted successfully"), "\n".join(self.summaries)
+                                        else:
+                                            yield self.log_progress("❌ FFmpeg restart failed - stopping"), "\n".join(self.summaries)
+                                            self.should_stop = True
+                                            break
+                            else:
+                                # File is growing - reset stall detection
+                                if self.segment_stall_check_time is not None:
+                                    # Was stalled, now growing again
+                                    yield self.log_progress(f"✅ Recording resumed: {current_segment.name} now at {size_mb:.1f} MB"), "\n".join(self.summaries)
+                                self.segment_stall_check_time = None
                                 self.last_segment_size = current_size
                             
                             # Show as "Finalizing" if we have valid max_index and it's the last segment needed
