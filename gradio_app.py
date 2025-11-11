@@ -156,21 +156,26 @@ class LivestreamSummarizerGradio:
             # Wait a moment for file handles to release
             time.sleep(2)
             
-            # Delete stalled/incomplete segments (so FFmpeg can create fresh ones)
-            self.log_progress("🗑️ Cleaning up stalled segments...")
+            # Delete ALL segments for clean restart (prevents segment numbering mismatch)
+            self.log_progress("🗑️ Cleaning up ALL segments for fresh restart...")
             segments = list(segments_dir.glob('segment_*.mp4'))
-            if segments:
-                # Get the current/latest segment (the stalled one)
+            deleted_count = 0
+            total_size = 0
+            
+            for segment in segments:
                 try:
-                    max_index = max(int(seg.stem.split('_')[1]) for seg in segments if seg.stem.split('_')[1].isdigit())
-                    stalled_segment = segments_dir / f"segment_{max_index:03d}.mp4"
-                    
-                    if stalled_segment.exists():
-                        size_mb = stalled_segment.stat().st_size / (1024 * 1024)
-                        stalled_segment.unlink()
-                        self.log_progress(f"   Deleted stalled {stalled_segment.name} ({size_mb:.1f} MB)")
+                    size = segment.stat().st_size / (1024 * 1024)
+                    segment.unlink()
+                    deleted_count += 1
+                    total_size += size
                 except Exception as e:
-                    self.log_progress(f"   ⚠️ Could not delete stalled segment: {e}")
+                    self.log_progress(f"   ⚠️ Could not delete {segment.name}: {e}")
+            
+            if deleted_count > 0:
+                self.log_progress(f"   Deleted {deleted_count} segments ({total_size:.1f} MB total)")
+            
+            # Reset segment tracking since we're starting fresh
+            self.last_end_index = -1
             
             # Re-extract HLS URL (might have expired)
             self.log_progress("🔄 Re-extracting fresh HLS URL from YouTube...")
