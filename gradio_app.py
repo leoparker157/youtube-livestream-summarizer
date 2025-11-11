@@ -156,26 +156,22 @@ class LivestreamSummarizerGradio:
             # Wait a moment for file handles to release
             time.sleep(2)
             
-            # Delete ALL segments for clean restart (prevents segment numbering mismatch)
-            self.log_progress("🗑️ Cleaning up ALL segments for fresh restart...")
+            # Delete ALL segments (FFmpeg will restart from segment_000.mp4)
+            self.log_progress("🗑️ Cleaning up ALL segments (restart from 0)...")
             segments = list(segments_dir.glob('segment_*.mp4'))
             deleted_count = 0
-            total_size = 0
+            if segments:
+                for seg in segments:
+                    try:
+                        seg.unlink()
+                        deleted_count += 1
+                    except Exception as e:
+                        self.log_progress(f"   ⚠️ Could not delete {seg.name}: {e}")
+                self.log_progress(f"   Deleted {deleted_count} segments")
             
-            for segment in segments:
-                try:
-                    size = segment.stat().st_size / (1024 * 1024)
-                    segment.unlink()
-                    deleted_count += 1
-                    total_size += size
-                except Exception as e:
-                    self.log_progress(f"   ⚠️ Could not delete {segment.name}: {e}")
-            
-            if deleted_count > 0:
-                self.log_progress(f"   Deleted {deleted_count} segments ({total_size:.1f} MB total)")
-            
-            # Reset segment tracking since we're starting fresh
+            # Reset tracking indices (FFmpeg restarts from 0)
             self.last_end_index = -1
+            self.log_progress("   Reset segment tracking")
             
             # Re-extract HLS URL (might have expired)
             self.log_progress("🔄 Re-extracting fresh HLS URL from YouTube...")
