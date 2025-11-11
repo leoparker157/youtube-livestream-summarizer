@@ -13,6 +13,8 @@ Run the app instantly in your browser - no installation required!
 2. Follow the notebook instructions
 3. Start summarizing livestreams immediately
 
+**Configuration**: Adjust video duration (60-300s), segments (10-30s), and overlap (0-2) for different processing speeds.
+
 ### Option 2: Local Installation
 Run on your local machine for full control.
 
@@ -64,10 +66,6 @@ The program will automatically adjust the number of segments and processing acco
    GEMINI_API_KEY=your_api_key_here
    ```
 
-### Google Colab
-
-No installation required! The Colab notebook automatically installs all dependencies.
-
 ## Usage
 
 ### Web Interface (Gradio)
@@ -77,12 +75,6 @@ Launch the interactive web interface:
 ```bash
 python gradio_app.py
 ```
-
-The interface provides:
-- **Configuration Panel**: Set YouTube URL, API key, and advanced settings
-- **Progress Log**: Real-time monitoring of recording and processing
-- **Summaries Panel**: Clean display of AI-generated summaries
-- **Custom Prompts**: Full control over how Gemini summarizes content
 
 ### Command Line Interface
 
@@ -118,34 +110,6 @@ python main.py <hls_url> "Create a detailed technical summary"
 - Custom prompts override the default summarization style
 - Summaries saved to `summary-[video-title].txt`
 
-## Gradio Web Interface
-
-The web interface provides an intuitive way to configure and monitor livestream summarization:
-
-### Features
-- **Real-time Progress Monitoring**: Live updates on recording and processing status
-- **Dual-Panel Display**: Separate progress log and summaries panels
-- **Customizable Settings**: Adjust video duration, segments, and overlap
-- **Prompt Editor**: Full control over Gemini summarization prompts
-- **One-Click Operation**: Start/stop with simple button controls
-
-### Configuration Examples
-
-#### Fast Processing (Quick Summaries)
-- Video Clip Duration: 60 seconds
-- Segment Duration: 10 seconds
-- Overlap: 0
-
-#### Standard Processing (Balanced)
-- Video Clip Duration: 120 seconds
-- Segment Duration: 10 seconds
-- Overlap: 0
-
-#### Deep Analysis (Detailed Summaries)
-- Video Clip Duration: 180-300 seconds
-- Segment Duration: 15 seconds
-- Overlap: 1-2
-
 ## API Setup
 
 ### Google Gemini API Key
@@ -162,25 +126,14 @@ The web interface provides an intuitive way to configure and monitor livestream 
 
 ## Troubleshooting
 
-### "Failed to extract HLS URL"
-- Ensure the YouTube URL is correct and the stream is live
-- Update yt-dlp: `pip install -U yt-dlp`
-- Try using a direct HLS URL instead
-
 ### "Gemini API Error"
 - Verify your API key is valid and has quota remaining
 - Check rate limits in Google AI Studio
 - Try reducing video clip duration
 
-### "FFmpeg Error"
+### Local Installation
 - Ensure FFmpeg is installed and accessible
-- Restart your runtime/session
-- Check if the stream URL is still valid
-
-### Colab-Specific Issues
-- Use GPU runtime for faster processing
-- Monitor disk usage for long sessions
-- Session may timeout - save important summaries
+- Install yt-dlp: `pip install yt-dlp`
 
 ## License
 MIT License - see LICENSE file for details
