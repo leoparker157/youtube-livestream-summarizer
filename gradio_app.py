@@ -198,6 +198,15 @@ class LivestreamSummarizerGradio:
                 except Exception as e:
                     self.log_progress(f"   ⚠️ Could not delete stalled segment: {e}")
             
+            # Extra wait to ensure filesystem has caught up
+            time.sleep(1)
+            
+            # Verify stalled segment is really gone before restart
+            check_segment = segments_dir / f"segment_{stalled_segment_number:03d}.mp4"
+            if check_segment.exists():
+                self.log_progress(f"   ⚠️ WARNING: segment_{stalled_segment_number:03d}.mp4 still exists!")
+                self.log_progress(f"   This might cause FFmpeg to fail or produce corrupted output")
+            
             # Re-extract HLS URL (might have expired)
             self.log_progress("🔄 Re-extracting fresh HLS URL from YouTube...")
             result = subprocess.run(
