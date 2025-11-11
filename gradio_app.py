@@ -85,8 +85,8 @@ class LivestreamSummarizerGradio:
         except:
             return False
     
-    def start_recording(self, hls_url, segment_duration, segments_dir):
-        """Start FFmpeg recording - EXACTLY matches main.py"""
+    def start_recording(self, hls_url, segment_duration, segments_dir, start_number=0):
+        """Start FFmpeg recording with optional segment start number"""
         
         # Check for NVENC availability
         has_nvenc = self.check_nvenc_available()
@@ -123,6 +123,7 @@ class LivestreamSummarizerGradio:
             '-i', hls_url,
             '-f', 'segment',
             '-segment_time', str(segment_duration),
+            '-segment_start_number', str(start_number),  # Start from specific segment number
             '-segment_wrap', '0',
             '-reset_timestamps', '1',
             '-c:v', video_codec,
@@ -156,22 +157,25 @@ class LivestreamSummarizerGradio:
             # Wait a moment for file handles to release
             time.sleep(2)
             
-            # Delete ALL segments (FFmpeg will restart from segment_000.mp4)
-            self.log_progress("🗑️ Cleaning up ALL segments (restart from 0)...")
+            # Find the stalled segment number and delete ONLY that one
+            self.log_progress("🗑️ Finding and deleting stalled segment...")
             segments = list(segments_dir.glob('segment_*.mp4'))
-            deleted_count = 0
-            if segments:
-                for seg in segments:
-                    try:
-                        seg.unlink()
-                        deleted_count += 1
-                    except Exception as e:
-                        self.log_progress(f"   ⚠️ Could not delete {seg.name}: {e}")
-                self.log_progress(f"   Deleted {deleted_count} segments")
+            stalled_segment_number = 0
             
-            # Reset tracking indices (FFmpeg restarts from 0)
-            self.last_end_index = -1
-            self.log_progress("   Reset segment tracking")
+            if segments:
+                try:
+                    # Get the latest segment index (the stalled one)
+                    max_index = max(int(seg.stem.split('_')[1]) for seg in segments if seg.stem.split('_')[1].isdigit())
+                    stalled_segment = segments_dir / f"segment_{max_index:03d}.mp4"
+                    stalled_segment_number = max_index
+                    
+                    if stalled_segment.exists():
+                        size_mb = stalled_segment.stat().st_size / (1024 * 1024)
+                        stalled_segment.unlink()
+                        self.log_progress(f"   Deleted stalled segment_{max_index:03d}.mp4 ({size_mb:.1f} MB)")
+                        self.log_progress(f"   Keeping segments 0-{max_index-1} (already complete)")
+                except Exception as e:
+                    self.log_progress(f"   ⚠️ Could not delete stalled segment: {e}")
             
             # Re-extract HLS URL (might have expired)
             self.log_progress("🔄 Re-extracting fresh HLS URL from YouTube...")
@@ -194,9 +198,9 @@ class LivestreamSummarizerGradio:
                 self.log_progress("❌ Could not extract fresh HLS URL")
                 return False
             
-            # Restart recording
-            self.log_progress("🎬 Restarting FFmpeg recording...")
-            self.start_recording(new_hls_url, segment_duration, segments_dir)
+            # Restart recording from the stalled segment number
+            self.log_progress(f"🎬 Restarting FFmpeg from segment_{stalled_segment_number:03d}...")
+            self.start_recording(new_hls_url, segment_duration, segments_dir, start_number=stalled_segment_number)
             
             self.ffmpeg_restart_count += 1
             self.last_restart_time = time.time()
