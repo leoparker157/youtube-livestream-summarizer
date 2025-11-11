@@ -27,11 +27,12 @@ FFMPEG_RECONNECT_STREAMED = 1                   # Reconnect to HLS streams (0=of
 FFMPEG_RECONNECT_DELAY_MAX = 10                 # Max delay between reconnects (seconds)
 FFMPEG_TIMEOUT = 30000000                       # FFmpeg timeout (microseconds, 30s = 30000000)
 
-# Video Encoding Settings
-VIDEO_BITRATE = '500k'                          # Video bitrate (e.g., '500k', '1M', '2M')
-VIDEO_RESOLUTION = '720'                        # Video height (e.g., '720', '480', '1080')
-VIDEO_FPS = 30                                  # Frames per second
-AUDIO_BITRATE = '64k'                           # Audio bitrate (e.g., '64k', '128k')
+# Video Encoding Settings (set to 'copy' to record original quality)
+VIDEO_CODEC_MODE = 'copy'                       # 'copy' = original quality, 'encode' = re-encode
+VIDEO_BITRATE = '2M'                            # Video bitrate (only used if VIDEO_CODEC_MODE='encode')
+VIDEO_RESOLUTION = '1080'                       # Video height (only used if VIDEO_CODEC_MODE='encode')
+VIDEO_FPS = 30                                  # Frames per second (only used if VIDEO_CODEC_MODE='encode')
+AUDIO_BITRATE = '128k'                          # Audio bitrate (only used if VIDEO_CODEC_MODE='encode')
 
 # Segment Settings
 SEGMENT_STALL_TIMEOUT = 10                       # Seconds to wait before detecting stall
@@ -125,29 +126,40 @@ class LivestreamSummarizerGradio:
     def start_recording(self, hls_url, segment_duration, segments_dir, start_number=0):
         """Start FFmpeg recording with optional segment start number"""
         
-        # Check for NVENC availability
-        has_nvenc = self.check_nvenc_available()
-        
-        if has_nvenc:
-            self.log_progress("🎮 GPU detected - using h264_nvenc hardware encoding")
-            video_codec = 'h264_nvenc'
-            codec_preset = 'fast'
-            codec_options = [
-                '-rc', 'cbr',
-                '-b:v', VIDEO_BITRATE,
-                '-maxrate', VIDEO_BITRATE,
-                '-bufsize', VIDEO_BITRATE
-            ]
+        # Determine codec mode: copy original or re-encode
+        if VIDEO_CODEC_MODE == 'copy':
+            self.log_progress("📹 Recording at ORIGINAL quality (stream copy mode)")
+            video_codec_options = ['-c:v', 'copy', '-c:a', 'copy']
+            codec_description = "Original quality (no re-encoding)"
         else:
-            self.log_progress("❌ ERROR: No GPU detected!")
-            self.log_progress("⚠️ GPU (h264_nvenc) is REQUIRED for livestream recording")
-            self.log_progress("⚠️ CPU encoding is too slow for real-time livestreams")
-            self.log_progress("📝 In Google Colab: Runtime → Change runtime type → T4 GPU")
-            raise RuntimeError(
-                "GPU with h264_nvenc encoder is required. "
-                "Please enable GPU in Colab (Runtime → Change runtime type → T4 GPU) "
-                "and restart the runtime."
-            )
+            # Re-encoding mode - check for GPU
+            has_nvenc = self.check_nvenc_available()
+            
+            if has_nvenc:
+                self.log_progress("🎮 GPU detected - using h264_nvenc hardware encoding")
+                video_codec_options = [
+                    '-c:v', 'h264_nvenc',
+                    '-preset', 'fast',
+                    '-rc', 'cbr',
+                    '-b:v', VIDEO_BITRATE,
+                    '-maxrate', VIDEO_BITRATE,
+                    '-bufsize', VIDEO_BITRATE,
+                    '-vf', f'scale=-2:{VIDEO_RESOLUTION},fps={VIDEO_FPS}',
+                    '-c:a', 'aac',
+                    '-b:a', AUDIO_BITRATE
+                ]
+                codec_description = f"{VIDEO_RESOLUTION}p H.264 @ {VIDEO_BITRATE} + {AUDIO_BITRATE} audio"
+            else:
+                self.log_progress("❌ ERROR: No GPU detected!")
+                self.log_progress("⚠️ GPU (h264_nvenc) is REQUIRED for re-encoding mode")
+                self.log_progress("💡 TIP: Set VIDEO_CODEC_MODE='copy' to record without re-encoding (no GPU needed)")
+                self.log_progress("📝 In Google Colab: Runtime → Change runtime type → T4 GPU")
+                raise RuntimeError(
+                    "GPU with h264_nvenc encoder is required for re-encoding mode. "
+                    "Set VIDEO_CODEC_MODE='copy' to record without GPU, or "
+                    "enable GPU in Colab (Runtime → Change runtime type → T4 GPU) "
+                    "and restart the runtime."
+                )
         
         # FFmpeg command with HLS timeout and reconnect options
         cmd = [
@@ -162,17 +174,13 @@ class LivestreamSummarizerGradio:
             '-segment_time', str(segment_duration),
             '-segment_start_number', str(start_number),  # Start from specific segment number
             '-segment_wrap', '0',
-            '-reset_timestamps', '1',
-            '-c:v', video_codec,
-            '-preset', codec_preset,
-        ] + codec_options + [
-            '-c:a', 'aac',
-            '-b:a', AUDIO_BITRATE,
+            '-reset_timestamps', '1'
+        ] + video_codec_options + [
             '-movflags', '+faststart',
             str(segments_dir / 'segment_%03d.mp4')
         ]
         
-        self.log_progress(f"⚙️ FFmpeg: Original quality H.264 @ {VIDEO_BITRATE} CBR + {AUDIO_BITRATE} audio")
+        self.log_progress(f"⚙️ FFmpeg: {codec_description}")
         # Capture stderr for debugging (but don't print to console)
         self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         time.sleep(5)
