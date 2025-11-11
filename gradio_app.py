@@ -169,25 +169,25 @@ class LivestreamSummarizerGradio:
                     "and restart the runtime."
                 )
         
-        # Use yt-dlp to pipe stream directly to ffmpeg (auto-refreshes HLS URLs)
-        # This is more reliable than ffmpeg's reconnect for YouTube livestreams
+        # Use streamlink to pipe stream directly to ffmpeg (auto-refreshes HLS URLs)
+        # streamlink is designed for piping and handles YouTube livestreams better than yt-dlp
         yt_dlp_cmd = [
-            'yt-dlp',
-            '-f', 'best',
-            '--no-part',
-            '--no-playlist',
-            '--no-warnings',
-            '--hls-use-mpegts',       # Use MPEG-TS for livestreams (better for pipes)
-            '--quiet',
-            '--output', '-',          # Output to stdout
-            self.youtube_url          # Use original YouTube URL, not HLS URL
+            'streamlink',
+            '--stdout',                 # Output to stdout (pipe to FFmpeg)
+            '--stream-segment-threads', '3',  # Use multiple threads for stability
+            '--hls-live-edge', '3',     # Stay 3 segments behind live edge (more stable)
+            '--retry-streams', '5',     # Retry connection up to 5 times
+            '--retry-open', '3',        # Retry opening stream 3 times
+            self.youtube_url,
+            'best'                      # Select best quality stream
         ]
         
         # FFmpeg reads from yt-dlp's stdout (pipe)
         ffmpeg_cmd = [
             'ffmpeg',
-            '-re',           # Read input at native frame rate (prevents rushing)
-            '-i', 'pipe:0',  # Read from stdin (yt-dlp's output)
+            '-fflags', '+genpts',      # Generate presentation timestamps
+            '-re',                     # Read input at native frame rate (prevents rushing)
+            '-i', 'pipe:0',            # Read from stdin (yt-dlp's output)
             '-f', 'segment',
             '-segment_time', str(segment_duration),
             '-segment_start_number', str(start_number),
