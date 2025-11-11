@@ -175,9 +175,16 @@ class LivestreamSummarizerGradio:
             # Re-extract HLS URL (might have expired)
             self.log_progress("🔄 Re-extracting fresh HLS URL from YouTube...")
             result = subprocess.run(
-                ['yt-dlp', '-f', 'best', '-g', self.youtube_url],
+                ['yt-dlp', '-g', self.youtube_url],
                 capture_output=True, text=True, timeout=30
             )
+            
+            # Try with explicit format if failed
+            if result.returncode != 0:
+                result = subprocess.run(
+                    ['yt-dlp', '-f', 'b', '-g', self.youtube_url],
+                    capture_output=True, text=True, timeout=30
+                )
             
             if result.returncode == 0 and result.stdout.strip():
                 new_hls_url = result.stdout.strip()
@@ -470,15 +477,31 @@ class LivestreamSummarizerGradio:
         yield self.log_progress("🔍 Extracting HLS URL from YouTube..."), ""
         
         try:
+            # Try without format selector first (yt-dlp will pick best)
             result = subprocess.run(
-                ['yt-dlp', '-f', 'best', '-g', youtube_url],
+                ['yt-dlp', '-g', youtube_url],
                 capture_output=True, text=True, timeout=30
             )
+            
+            # If that fails, try with explicit format
+            if result.returncode != 0:
+                yield self.log_progress("⚠️ Retrying with explicit format..."), ""
+                result = subprocess.run(
+                    ['yt-dlp', '-f', 'b', '-g', youtube_url],
+                    capture_output=True, text=True, timeout=30
+                )
+            
             if result.returncode != 0:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
                 yield self.log_progress(f"❌ Failed to extract HLS URL"), ""
-                yield self.log_progress(f"   Error: {error_msg}"), ""
-                yield self.log_progress(f"   Make sure yt-dlp is installed and YouTube URL is valid"), ""
+                
+                # Check for bot detection
+                if "Sign in to confirm" in error_msg or "not a bot" in error_msg:
+                    yield self.log_progress(f"   ⚠️ YouTube detected bot - requires authentication"), ""
+                    yield self.log_progress(f"   💡 Try: pip install -U yt-dlp (update to latest)"), ""
+                else:
+                    yield self.log_progress(f"   Error: {error_msg}"), ""
+                    yield self.log_progress(f"   Make sure yt-dlp is installed and YouTube URL is valid"), ""
                 return
             hls_url = result.stdout.strip()
             if not hls_url:

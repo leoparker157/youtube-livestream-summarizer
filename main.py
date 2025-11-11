@@ -834,18 +834,36 @@ def main():
                 stream_name = "stream"
         
         try:
+            # Try without format selector first
             result = subprocess.run(
-                ['yt-dlp', '-f', 'best', '-g', url],
+                ['yt-dlp', '-g', url],
                 capture_output=True, 
                 text=True,
                 timeout=30
             )
+            
+            # If failed, try with explicit format
+            if result.returncode != 0:
+                print("⚠️ Retrying with explicit format...")
+                result = subprocess.run(
+                    ['yt-dlp', '-f', 'b', '-g', url],
+                    capture_output=True, 
+                    text=True,
+                    timeout=30
+                )
+            
             if result.returncode == 0 and result.stdout.strip():
                 hls_url = result.stdout.strip()
                 print(f"Got HLS URL: {hls_url}")
             else:
-                print(f"❌ Failed to extract HLS URL from YouTube: {result.stderr}")
-                print("Make sure yt-dlp is installed and the YouTube URL is valid.")
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                print(f"❌ Failed to extract HLS URL from YouTube")
+                if "Sign in to confirm" in error_msg or "not a bot" in error_msg:
+                    print("⚠️ YouTube detected bot - requires authentication")
+                    print("💡 Try: pip install -U yt-dlp (update to latest)")
+                else:
+                    print(f"Error: {error_msg}")
+                    print("Make sure yt-dlp is installed and the YouTube URL is valid.")
                 sys.exit(1)
         except FileNotFoundError:
             print("❌ yt-dlp not found. Install yt-dlp with: pip install yt-dlp")
