@@ -35,7 +35,7 @@ VIDEO_FPS = 30                                  # Frames per second (only used i
 AUDIO_BITRATE = '128k'                          # Audio bitrate (only used if VIDEO_CODEC_MODE='encode')
 
 # Segment Settings
-SEGMENT_STALL_TIMEOUT = 60                       # Seconds to wait before detecting stall (increased from 10)
+SEGMENT_STALL_TIMEOUT = 10                       # Seconds to wait before detecting stall
 FFMPEG_RESTART_COOLDOWN = 30                    # Minimum seconds between FFmpeg restarts
 
 # Concatenation & Retry Settings
@@ -67,6 +67,7 @@ logging.getLogger('google').setLevel(logging.WARNING)
 class LivestreamSummarizerGradio:
     def __init__(self):
         self.recording_process = None
+        self.yt_dlp_process = None  # yt-dlp process for piping stream
         self.ffmpeg_stderr = None  # Store FFmpeg stderr for debugging
         self.segment_stall_check_time = None  # Track when we first detected potential stall
         self.last_segment_size = 0  # Track segment size changes
@@ -124,7 +125,10 @@ class LivestreamSummarizerGradio:
             return False
     
     def start_recording(self, hls_url, segment_duration, segments_dir, start_number=0):
-        """Start FFmpeg recording with optional segment start number"""
+        """Start FFmpeg recording with optional segment start number
+        
+        Uses streamlink to maintain continuous HLS connection and auto-refresh URLs
+        """
         
         # Determine codec mode: copy original or re-encode
         if VIDEO_CODEC_MODE == 'copy':
@@ -161,18 +165,26 @@ class LivestreamSummarizerGradio:
                     "and restart the runtime."
                 )
         
-        # FFmpeg command with HLS timeout and reconnect options (same as main.py)
-        cmd = [
+        # Use yt-dlp to pipe stream directly to ffmpeg (auto-refreshes HLS URLs)
+        # This is more reliable than ffmpeg's reconnect for YouTube livestreams
+        yt_dlp_cmd = [
+            'yt-dlp',
+            '-f', 'best',
+            '--no-part',
+            '--no-playlist',
+            '--no-warnings',
+            '--quiet',
+            '--output', '-',  # Output to stdout
+            self.youtube_url  # Use original YouTube URL, not HLS URL
+        ]
+        
+        # FFmpeg reads from yt-dlp's stdout (pipe)
+        ffmpeg_cmd = [
             'ffmpeg',
-            # HLS input options for stability
-            '-reconnect', str(FFMPEG_RECONNECT_ENABLED),
-            '-reconnect_streamed', str(FFMPEG_RECONNECT_STREAMED),
-            '-reconnect_delay_max', str(FFMPEG_RECONNECT_DELAY_MAX),
-            '-timeout', str(FFMPEG_TIMEOUT),
-            '-i', hls_url,
+            '-i', 'pipe:0',  # Read from stdin (yt-dlp's output)
             '-f', 'segment',
             '-segment_time', str(segment_duration),
-            '-segment_start_number', str(start_number),  # Start from specific segment number
+            '-segment_start_number', str(start_number),
             '-segment_wrap', '0',
             '-reset_timestamps', '1'
         ] + video_codec_options + [
@@ -181,14 +193,36 @@ class LivestreamSummarizerGradio:
         ]
         
         self.log_progress(f"⚙️ FFmpeg: {codec_description}")
-        # Capture stderr for debugging (but don't print to console)
-        self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        self.log_progress(f"⚙️ Using yt-dlp pipe for continuous HLS refresh")
+        
+        # Start yt-dlp process (pipes stream to FFmpeg)
+        yt_dlp_process = subprocess.Popen(
+            yt_dlp_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL
+        )
+        
+        # Start FFmpeg process (reads from yt-dlp's stdout)
+        self.recording_process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=yt_dlp_process.stdout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Store yt-dlp process so we can terminate it later
+        self.yt_dlp_process = yt_dlp_process
+        
+        # Allow yt-dlp to receive SIGPIPE if FFmpeg exits
+        yt_dlp_process.stdout.close()
+        
         time.sleep(5)
     
     def restart_ffmpeg(self, segment_duration, segments_dir):
         """Restart FFmpeg recording after detecting stall"""
         try:
-            # Kill old process
+            # Kill old processes (both FFmpeg and yt-dlp)
             if self.recording_process and self.recording_process.poll() is None:
                 self.log_progress("⏹️ Terminating stalled FFmpeg process...")
                 try:
@@ -197,6 +231,15 @@ class LivestreamSummarizerGradio:
                 except:
                     self.recording_process.kill()
                     self.recording_process.wait()
+            
+            if self.yt_dlp_process and self.yt_dlp_process.poll() is None:
+                self.log_progress("⏹️ Terminating yt-dlp process...")
+                try:
+                    self.yt_dlp_process.terminate()
+                    self.yt_dlp_process.wait(timeout=5)
+                except:
+                    self.yt_dlp_process.kill()
+                    self.yt_dlp_process.wait()
             
             # Wait a moment for file handles to release
             time.sleep(2)
@@ -221,30 +264,10 @@ class LivestreamSummarizerGradio:
                 except Exception as e:
                     self.log_progress(f"   ⚠️ Could not delete stalled segment: {e}")
             
-            # Re-extract HLS URL (might have expired)
-            self.log_progress("🔄 Re-extracting fresh HLS URL from YouTube...")
-            result = subprocess.run(
-                ['yt-dlp', '-g', self.youtube_url],
-                capture_output=True, text=True, timeout=30
-            )
-            
-            # Try with explicit format if failed
-            if result.returncode != 0:
-                result = subprocess.run(
-                    ['yt-dlp', '-f', 'b', '-g', self.youtube_url],
-                    capture_output=True, text=True, timeout=30
-                )
-            
-            if result.returncode == 0 and result.stdout.strip():
-                new_hls_url = result.stdout.strip()
-                self.log_progress("✅ Got fresh HLS URL")
-            else:
-                self.log_progress("❌ Could not extract fresh HLS URL")
-                return False
-            
             # Restart recording from the stalled segment number
-            self.log_progress(f"🎬 Restarting FFmpeg from segment_{stalled_segment_number:03d}...")
-            self.start_recording(new_hls_url, segment_duration, segments_dir, start_number=stalled_segment_number)
+            # No need to re-extract HLS URL - yt-dlp handles that automatically
+            self.log_progress(f"🎬 Restarting recording from segment_{stalled_segment_number:03d}...")
+            self.start_recording(None, segment_duration, segments_dir, start_number=stalled_segment_number)
             
             self.ffmpeg_restart_count += 1
             self.last_restart_time = time.time()
@@ -522,61 +545,12 @@ class LivestreamSummarizerGradio:
         yield self.log_progress(f"⚙️ Configuration: {video_duration}s clips, {segment_duration}s segments, {num_segments} segments per cycle"), ""
         yield self.log_progress(f"🤖 Model: {model_name} | Google Search: {'Enabled' if use_google_search else 'Disabled'}"), ""
         
-        # Extract HLS URL
-        yield self.log_progress("🔍 Extracting HLS URL from YouTube..."), ""
-        
+        # Start recording (no need to extract HLS URL - yt-dlp handles that internally)
+        yield self.log_progress("🎬 Starting FFmpeg recording with yt-dlp stream..."), ""
         try:
-            # Try without format selector first (yt-dlp will pick best)
-            result = subprocess.run(
-                ['yt-dlp', '-g', youtube_url],
-                capture_output=True, text=True, timeout=30
-            )
-            
-            # If that fails, try with explicit format
-            if result.returncode != 0:
-                yield self.log_progress("⚠️ Retrying with explicit format..."), ""
-                result = subprocess.run(
-                    ['yt-dlp', '-f', 'b', '-g', youtube_url],
-                    capture_output=True, text=True, timeout=30
-                )
-            
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                yield self.log_progress(f"❌ Failed to extract HLS URL"), ""
-                
-                # Check for bot detection
-                if "Sign in to confirm" in error_msg or "not a bot" in error_msg:
-                    yield self.log_progress(f"   ⚠️ YouTube detected bot - requires authentication"), ""
-                    yield self.log_progress(f"   💡 Try: pip install -U yt-dlp (update to latest)"), ""
-                else:
-                    yield self.log_progress(f"   Error: {error_msg}"), ""
-                    yield self.log_progress(f"   Make sure yt-dlp is installed and YouTube URL is valid"), ""
-                return
-            hls_url = result.stdout.strip()
-            if not hls_url:
-                yield self.log_progress("❌ Empty HLS URL returned"), ""
-                yield self.log_progress("   The stream might not be live or URL is invalid"), ""
-                return
-            yield self.log_progress(f"✅ HLS URL extracted"), ""
-            logger.info(f"HLS URL: {hls_url}")
-        except FileNotFoundError:
-            yield self.log_progress(f"❌ yt-dlp not found!"), ""
-            yield self.log_progress(f"   Install with: pip install yt-dlp"), ""
-            return
-        except subprocess.TimeoutExpired:
-            yield self.log_progress(f"❌ yt-dlp timed out after 30 seconds"), ""
-            yield self.log_progress(f"   Check your internet connection"), ""
-            return
-        except Exception as e:
-            yield self.log_progress(f"❌ Error extracting HLS URL: {e}"), ""
-            logger.error(f"HLS extraction error: {e}")
-            return
-        
-        # Start recording
-        yield self.log_progress("🎬 Starting FFmpeg recording..."), ""
-        try:
-            self.start_recording(hls_url, segment_duration, segments_dir)
+            self.start_recording(None, segment_duration, segments_dir)
             yield self.log_progress(f"✅ Recording started (segments: {segment_duration}s each)"), ""
+            yield self.log_progress(f"✅ Using yt-dlp pipe for continuous HLS refresh"), ""
         except Exception as e:
             yield self.log_progress(f"❌ Recording error: {e}"), ""
             return
@@ -585,11 +559,19 @@ class LivestreamSummarizerGradio:
         
         try:
             while not self.should_stop:
-                # Check if FFmpeg recording process is still running
-                if self.recording_process and self.recording_process.poll() is not None:
-                    # FFmpeg died - capture stderr for diagnostics
-                    exit_code = self.recording_process.returncode
-                    error_msg = f"❌ FFmpeg process died! Exit code: {exit_code}"
+                # Check if FFmpeg or yt-dlp process died
+                ffmpeg_dead = self.recording_process and self.recording_process.poll() is not None
+                ytdlp_dead = self.yt_dlp_process and self.yt_dlp_process.poll() is not None
+                
+                if ffmpeg_dead or ytdlp_dead:
+                    # Process died - capture diagnostics
+                    if ffmpeg_dead:
+                        exit_code = self.recording_process.returncode
+                        error_msg = f"❌ FFmpeg process died! Exit code: {exit_code}"
+                    else:
+                        exit_code = self.yt_dlp_process.returncode
+                        error_msg = f"❌ yt-dlp process died! Exit code: {exit_code}"
+                    
                     yield self.log_progress(""), "\n".join(self.summaries)
                     yield self.log_progress("="*60), "\n".join(self.summaries)
                     yield self.log_progress(error_msg), "\n".join(self.summaries)
@@ -866,14 +848,24 @@ class LivestreamSummarizerGradio:
         finally:
             # Stop recording if still running
             if self.recording_process and self.recording_process.poll() is None:
-                yield self.log_progress("⏹️ Stopping recording..."), "\n".join(self.summaries)
+                yield self.log_progress("⏹️ Stopping FFmpeg..."), "\n".join(self.summaries)
                 try:
                     self.recording_process.terminate()
                     self.recording_process.wait(timeout=5)
                 except:
                     self.recording_process.kill()
                     self.recording_process.wait()
-                yield self.log_progress("✅ Recording stopped"), "\n".join(self.summaries)
+                yield self.log_progress("✅ FFmpeg stopped"), "\n".join(self.summaries)
+            
+            if self.yt_dlp_process and self.yt_dlp_process.poll() is None:
+                yield self.log_progress("⏹️ Stopping yt-dlp..."), "\n".join(self.summaries)
+                try:
+                    self.yt_dlp_process.terminate()
+                    self.yt_dlp_process.wait(timeout=5)
+                except:
+                    self.yt_dlp_process.kill()
+                    self.yt_dlp_process.wait()
+                yield self.log_progress("✅ yt-dlp stopped"), "\n".join(self.summaries)
     
     def stop_recording(self):
         """Stop the recording process"""
@@ -901,7 +893,23 @@ class LivestreamSummarizerGradio:
             except Exception as e:
                 self.log_progress(f"❌ Error stopping FFmpeg: {e}")
         else:
-            self.log_progress("⚠️ No recording process found")
+            self.log_progress("⚠️ No FFmpeg recording process found")
+        
+        # Terminate yt-dlp process
+        if self.yt_dlp_process:
+            try:
+                self.log_progress("⏹️ Terminating yt-dlp process...")
+                self.yt_dlp_process.terminate()
+                
+                try:
+                    self.yt_dlp_process.wait(timeout=5)
+                    self.log_progress("✅ yt-dlp process terminated")
+                except:
+                    self.yt_dlp_process.kill()
+                    self.yt_dlp_process.wait()
+                    self.log_progress("✅ yt-dlp process killed")
+            except Exception as e:
+                self.log_progress(f"❌ Error stopping yt-dlp: {e}")
         
         self.log_progress("✅ Stop complete")
         

@@ -805,25 +805,15 @@ class LivestreamSummarizer:
             self.stop_recording()
 
 def main():
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or len(sys.argv) > 3:
         print("Usage: python main.py <youtube_url_or_hls_url> [prompt]")
         print("  - If prompt is empty, uses default prompt")
         print("  - If prompt is provided, uses it for Gemini summarization")
-        print("\nExample:")
-        print('  python main.py https://youtube.com/watch?v=... "summarize this stream"')
         sys.exit(1)
 
     url = sys.argv[1]
-    custom_prompt = ' '.join(sys.argv[2:]) if len(sys.argv) > 2 else None
+    custom_prompt = sys.argv[2] if len(sys.argv) == 3 else None
     stream_name = None  # Will be auto-extracted from YouTube title
-    
-    # Debug: show what arguments were received
-    print(f"Arguments received: {len(sys.argv)}")
-    print(f"URL: {url}")
-    if custom_prompt:
-        print(f"Custom prompt: {custom_prompt}")
-    else:
-        print("No custom prompt - using default")
     
     # Check if it's a YouTube URL and extract HLS URL using yt-dlp
     if 'youtube.com' in url or 'youtu.be' in url:
