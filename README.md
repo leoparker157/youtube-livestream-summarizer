@@ -40,6 +40,17 @@ VIDEO_DURATION_SECONDS = 300  # 5 minutes
 
 The program will automatically adjust the number of segments and processing accordingly.
 
+### Overlap Settings
+
+Overlap determines how many segments from the previous cycle are reused in the current cycle. This ensures smooth transitions and prevents missing content at cycle boundaries.
+
+**Examples:**
+- `overlap_segments = 0`: No overlap - each 120s cycle is completely separate
+- `overlap_segments = 1`: 30s overlap - last 30 seconds of previous cycle becomes first 30 seconds of current cycle
+- `overlap_segments = 2`: 60s overlap - last 60 seconds of previous cycle becomes first 60 seconds of current cycle
+
+Higher overlap provides better continuity but increases processing time and API usage.
+
 ## Prerequisites
 
 - Python 3.9+
