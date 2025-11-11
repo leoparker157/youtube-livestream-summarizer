@@ -47,8 +47,6 @@ The program will automatically adjust the number of segments and processing acco
 
 ## Installation
 
-### Local Installation
-
 1. Install Python dependencies:
    ```bash
    pip install -r requirements.txt
@@ -63,10 +61,6 @@ The program will automatically adjust the number of segments and processing acco
    ```
    GEMINI_API_KEY=your_api_key_here
    ```
-
-### Google Colab
-
-No installation required! The Colab notebook automatically installs all dependencies.
 
 ## Usage
 
@@ -154,11 +148,6 @@ The web interface provides an intuitive way to configure and monitor livestream 
 - Ensure FFmpeg is installed and accessible
 - Restart your runtime/session
 - Check if the stream URL is still valid
-
-### Colab-Specific Issues
-- Use GPU runtime for faster processing
-- Monitor disk usage for long sessions
-- Session may timeout - save important summaries
 
 ## License
 MIT License - see LICENSE file for details
