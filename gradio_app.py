@@ -154,8 +154,8 @@ class LivestreamSummarizerGradio:
                     self.recording_process.kill()
                     self.recording_process.wait()
             
-            # Wait a moment for file handles to release
-            time.sleep(2)
+            # Wait longer for file handles to release
+            time.sleep(3)
             
             # Find the stalled segment number and delete ONLY that one
             self.log_progress("🗑️ Finding and deleting stalled segment...")
@@ -171,9 +171,30 @@ class LivestreamSummarizerGradio:
                     
                     if stalled_segment.exists():
                         size_mb = stalled_segment.stat().st_size / (1024 * 1024)
-                        stalled_segment.unlink()
-                        self.log_progress(f"   Deleted stalled segment_{max_index:03d}.mp4 ({size_mb:.1f} MB)")
-                        self.log_progress(f"   Keeping segments 0-{max_index-1} (already complete)")
+                        
+                        # Try to delete with retry
+                        deleted = False
+                        for attempt in range(3):
+                            try:
+                                stalled_segment.unlink()
+                                deleted = True
+                                break
+                            except PermissionError:
+                                if attempt < 2:
+                                    time.sleep(1)
+                                else:
+                                    raise
+                        
+                        if deleted:
+                            # Verify deletion
+                            if not stalled_segment.exists():
+                                self.log_progress(f"   ✅ Deleted stalled segment_{max_index:03d}.mp4 ({size_mb:.1f} MB)")
+                                if max_index > 0:
+                                    self.log_progress(f"   📁 Keeping segments 0-{max_index-1} (already complete)")
+                                else:
+                                    self.log_progress(f"   📁 This was the first segment")
+                            else:
+                                self.log_progress(f"   ⚠️ File still exists after deletion attempt")
                 except Exception as e:
                     self.log_progress(f"   ⚠️ Could not delete stalled segment: {e}")
             
