@@ -45,10 +45,17 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('google').setLevel(logging.WARNING)
 
 class LivestreamSummarizer:
-    def __init__(self, hls_url: str, api_key: str, stream_name: str = None):
+    def __init__(self, hls_url: str, api_key: str, stream_name: str = None, custom_prompt: str = None):
         self.hls_url = hls_url
         self.api_key = api_key
         self.stream_name = stream_name or "stream"
+        
+        # Default prompt if none provided
+        self.custom_prompt = custom_prompt or """liveposting, summary detail this stream for me in english
+              1. paragraph style, no bullets style
+              2. only provide liveposting nothing else, don't talk about you or something else outside the stream
+              3. don't mention timestamp of the video
+              4. simple english"""
         
         # Validate overlap configuration to prevent infinite loops
         global OVERLAP_SEGMENTS
@@ -507,17 +514,13 @@ class LivestreamSummarizer:
                 logger.info("Google Search grounding disabled")
                 config = types.GenerateContentConfig()
             
-            # Create properly structured content with both text prompt and video
-            prompt_text = """liveposting, summary detail this stream for me in english
-              1. paragraph style, no bullets style
-              2. only provide liveposting nothing else, don't talk about you or something else outside the stream
-              3. don't mention timestamp of the video
-              4. simple english"""
+            # Use custom prompt from instance variable
+            logger.info(f"Using prompt: {self.custom_prompt[:50]}...")
             
             response = self.client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=[
-                    types.Part.from_text(text=prompt_text),
+                    types.Part.from_text(text=self.custom_prompt),
                     types.Part.from_uri(file_uri=video_file.uri, mime_type=video_file.mime_type)
                 ],
                 config=config
@@ -802,12 +805,25 @@ class LivestreamSummarizer:
             self.stop_recording()
 
 def main():
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("Usage: python main.py <youtube_url_or_hls_url> [stream_name]")
+    if len(sys.argv) < 2:
+        print("Usage: python main.py <youtube_url_or_hls_url> [prompt]")
+        print("  - If prompt is empty, uses default prompt")
+        print("  - If prompt is provided, uses it for Gemini summarization")
+        print("\nExample:")
+        print('  python main.py https://youtube.com/watch?v=... "summarize this stream"')
         sys.exit(1)
 
     url = sys.argv[1]
-    stream_name = sys.argv[2] if len(sys.argv) == 3 else None
+    custom_prompt = ' '.join(sys.argv[2:]) if len(sys.argv) > 2 else None
+    stream_name = None  # Will be auto-extracted from YouTube title
+    
+    # Debug: show what arguments were received
+    print(f"Arguments received: {len(sys.argv)}")
+    print(f"URL: {url}")
+    if custom_prompt:
+        print(f"Custom prompt: {custom_prompt}")
+    else:
+        print("No custom prompt - using default")
     
     # Check if it's a YouTube URL and extract HLS URL using yt-dlp
     if 'youtube.com' in url or 'youtu.be' in url:
@@ -887,8 +903,14 @@ def main():
         print("Please set GEMINI_API_KEY in .env file")
         sys.exit(1)
 
+    # Show prompt being used
+    if custom_prompt:
+        print(f"Using custom prompt: {custom_prompt[:50]}...")
+    else:
+        print("Using default prompt")
+    
     print(f"Summary file: summary-{stream_name}.txt")
-    summarizer = LivestreamSummarizer(hls_url, api_key, stream_name)
+    summarizer = LivestreamSummarizer(hls_url, api_key, stream_name, custom_prompt)
     summarizer.run()
 
 if __name__ == "__main__":

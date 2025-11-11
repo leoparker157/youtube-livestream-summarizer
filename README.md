@@ -86,15 +86,37 @@ The interface provides:
 
 ### Command Line Interface
 
-Run the script with a YouTube URL or HLS URL:
+Run the script with a YouTube URL and optional custom prompt:
 
 ```bash
+# Use default prompt
 python main.py <youtube_url>
-# or
-python main.py <hls_url>
+
+# Use custom prompt
+python main.py <youtube_url> "Your custom prompt here"
 ```
 
-The script will automatically detect YouTube URLs and extract the HLS stream using yt-dlp. For direct HLS URLs, it will use them as-is.
+**Examples:**
+
+```bash
+# Default summarization
+python main.py https://youtube.com/watch?v=...
+
+# Custom gaming stream prompt
+python main.py https://youtube.com/watch?v=... "Summarize the key gaming moments and funny reactions"
+
+# Custom news stream prompt
+python main.py https://youtube.com/watch?v=... "Extract main headlines and controversies discussed"
+
+# Direct HLS URL with custom prompt
+python main.py <hls_url> "Create a detailed technical summary"
+```
+
+**Features:**
+- Automatically extracts HLS stream from YouTube URLs using yt-dlp
+- Stream name auto-extracted from YouTube video title
+- Custom prompts override the default summarization style
+- Summaries saved to `summary-[video-title].txt`
 
 ## Gradio Web Interface
 
