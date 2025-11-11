@@ -20,6 +20,43 @@ from google.genai import types
 # Load environment variables
 load_dotenv()
 
+# ==================== CONFIGURATION CONSTANTS ====================
+# FFmpeg Recording Settings
+FFMPEG_RECONNECT_ENABLED = 1                    # Enable automatic reconnection (0=off, 1=on)
+FFMPEG_RECONNECT_STREAMED = 1                   # Reconnect to HLS streams (0=off, 1=on)
+FFMPEG_RECONNECT_DELAY_MAX = 10                 # Max delay between reconnects (seconds)
+FFMPEG_TIMEOUT = 30000000                       # FFmpeg timeout (microseconds, 30s = 30000000)
+
+# Video Encoding Settings
+VIDEO_BITRATE = '500k'                          # Video bitrate (e.g., '500k', '1M', '2M')
+VIDEO_RESOLUTION = '720'                        # Video height (e.g., '720', '480', '1080')
+VIDEO_FPS = 30                                  # Frames per second
+AUDIO_BITRATE = '64k'                           # Audio bitrate (e.g., '64k', '128k')
+
+# Segment Settings
+SEGMENT_STALL_TIMEOUT = 3                       # Seconds to wait before detecting stall
+FFMPEG_RESTART_COOLDOWN = 30                    # Minimum seconds between FFmpeg restarts
+
+# Concatenation & Retry Settings
+CONCAT_MAX_RETRIES = 3                          # Max retries for FFmpeg concatenation
+CONCAT_RETRY_DELAY = 120                        # Seconds to wait between concat retries
+CONCAT_TIMEOUT = 300                            # Timeout for concatenation (seconds)
+
+# Gemini API Settings
+GEMINI_MAX_RETRIES = 3                          # Max retries for Gemini API calls
+GEMINI_RETRY_DELAY = 30                         # Seconds to wait between Gemini retries
+GEMINI_UPLOAD_TIMEOUT = 300                     # Timeout for video upload (seconds)
+GEMINI_POLL_INTERVAL = 5                        # Seconds between processing status checks
+GEMINI_MODEL = 'gemini-2.5-flash'              # Gemini model name
+
+# Default Prompt
+DEFAULT_PROMPT = """liveposting, summary detail this stream for me in english
+1. paragraph style, no bullets style
+2. only provide liveposting nothing else, don't talk about you or something else outside the stream
+3. don't mention timestamp of the video
+4. simple english"""
+# =================================================================
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -97,9 +134,9 @@ class LivestreamSummarizerGradio:
             codec_preset = 'fast'
             codec_options = [
                 '-rc', 'cbr',
-                '-b:v', '500k',
-                '-maxrate', '500k',
-                '-bufsize', '500k'
+                '-b:v', VIDEO_BITRATE,
+                '-maxrate', VIDEO_BITRATE,
+                '-bufsize', VIDEO_BITRATE
             ]
         else:
             self.log_progress("❌ ERROR: No GPU detected!")
@@ -116,10 +153,10 @@ class LivestreamSummarizerGradio:
         cmd = [
             'ffmpeg',
             # HLS input options for stability
-            '-reconnect', '1',              # Enable automatic reconnection
-            '-reconnect_streamed', '1',     # Reconnect to streamed (HLS) input
-            '-reconnect_delay_max', '10',   # Max delay between reconnects (10 seconds)
-            '-timeout', '30000000',         # 30 second timeout (in microseconds)
+            '-reconnect', str(FFMPEG_RECONNECT_ENABLED),
+            '-reconnect_streamed', str(FFMPEG_RECONNECT_STREAMED),
+            '-reconnect_delay_max', str(FFMPEG_RECONNECT_DELAY_MAX),
+            '-timeout', str(FFMPEG_TIMEOUT),
             '-i', hls_url,
             '-f', 'segment',
             '-segment_time', str(segment_duration),
@@ -129,14 +166,14 @@ class LivestreamSummarizerGradio:
             '-c:v', video_codec,
             '-preset', codec_preset,
         ] + codec_options + [
-            '-vf', 'scale=-2:720,fps=30',
+            '-vf', f'scale=-2:{VIDEO_RESOLUTION},fps={VIDEO_FPS}',
             '-c:a', 'aac',
-            '-b:a', '64k',
+            '-b:a', AUDIO_BITRATE,
             '-movflags', '+faststart',
             str(segments_dir / 'segment_%03d.mp4')
         ]
         
-        self.log_progress(f"⚙️ FFmpeg: 720p H.264 @ 500k CBR + 64k audio")
+        self.log_progress(f"⚙️ FFmpeg: {VIDEO_RESOLUTION}p H.264 @ {VIDEO_BITRATE} CBR + {AUDIO_BITRATE} audio")
         # Capture stderr for debugging (but don't print to console)
         self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         time.sleep(5)
@@ -266,8 +303,8 @@ class LivestreamSummarizerGradio:
             logger.info(f"Concat file contents:\n{f.read()}")
         
         # Concatenate with retry logic (like main.py)
-        max_retries = 3
-        retry_delay = 120
+        max_retries = CONCAT_MAX_RETRIES
+        retry_delay = CONCAT_RETRY_DELAY
         
         for attempt in range(1, max_retries + 1):
             logger.info(f"Starting concatenation (attempt {attempt}/{max_retries})")
@@ -277,7 +314,7 @@ class LivestreamSummarizerGradio:
             ]
             
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=CONCAT_TIMEOUT)
                 
                 if result.returncode == 0:
                     logger.info(f"Concatenation completed successfully")
@@ -310,11 +347,11 @@ class LivestreamSummarizerGradio:
             self.log_progress("⏳ Waiting for Gemini to process video...")
             poll_count = 0
             while video_file.state.name == "PROCESSING":
-                time.sleep(5)
+                time.sleep(GEMINI_POLL_INTERVAL)
                 video_file = client.files.get(name=video_file.name)
                 poll_count += 1
                 if poll_count % 6 == 0:  # Log every 30 seconds
-                    self.log_progress(f"⏳ Still processing... ({poll_count * 5}s elapsed)")
+                    self.log_progress(f"⏳ Still processing... ({poll_count * GEMINI_POLL_INTERVAL}s elapsed)")
             
             if video_file.state.name != "ACTIVE":
                 self.log_progress(f"❌ Video upload failed: {video_file.state.name}")
@@ -679,14 +716,14 @@ class LivestreamSummarizerGradio:
                                     # Size hasn't changed - check for stall
                                     if finalizing_stall_start is None:
                                         finalizing_stall_start = time.time()
-                                    elif time.time() - finalizing_stall_start >= 3:
-                                        # Stalled for 3+ seconds during finalization
+                                    elif time.time() - finalizing_stall_start >= SEGMENT_STALL_TIMEOUT:
+                                        # Stalled for configured timeout during finalization
                                         stall_duration = int(time.time() - finalizing_stall_start)
                                         size_mb = current_size / (1024 * 1024)
                                         yield self.log_progress(f"🚨 STALL DETECTED: {last_segment_path.name} not growing for {stall_duration}s at {size_mb:.1f} MB"), "\n".join(self.summaries)
                                         
                                         # Check restart cooldown
-                                        if time.time() - self.last_restart_time < 30:
+                                        if time.time() - self.last_restart_time < FFMPEG_RESTART_COOLDOWN:
                                             yield self.log_progress(f"⚠️ Skipping restart (last restart was {int(time.time() - self.last_restart_time)}s ago)"), "\n".join(self.summaries)
                                         else:
                                             yield self.log_progress("🔄 Attempting to restart FFmpeg..."), "\n".join(self.summaries)
@@ -760,13 +797,13 @@ class LivestreamSummarizerGradio:
                                 if self.segment_stall_check_time is None:
                                     # First time detecting no growth - start timer
                                     self.segment_stall_check_time = time.time()
-                                elif time.time() - self.segment_stall_check_time >= 3:
-                                    # File hasn't grown for 3+ seconds - RESTART FFmpeg
+                                elif time.time() - self.segment_stall_check_time >= SEGMENT_STALL_TIMEOUT:
+                                    # File hasn't grown for configured timeout - RESTART FFmpeg
                                     stall_duration = int(time.time() - self.segment_stall_check_time)
                                     yield self.log_progress(f"🚨 STALL DETECTED: {current_segment.name} not growing for {stall_duration}s at {size_mb:.1f} MB"), "\n".join(self.summaries)
                                     
-                                    # Prevent restart spam (max 1 restart per 30 seconds)
-                                    if time.time() - self.last_restart_time < 30:
+                                    # Prevent restart spam
+                                    if time.time() - self.last_restart_time < FFMPEG_RESTART_COOLDOWN:
                                         yield self.log_progress(f"⚠️ Skipping restart (last restart was {int(time.time() - self.last_restart_time)}s ago)"), "\n".join(self.summaries)
                                     else:
                                         yield self.log_progress("🔄 Attempting to restart FFmpeg..."), "\n".join(self.summaries)
@@ -899,7 +936,7 @@ def create_interface():
                         "gemini-2.5-pro",
                         "gemini-2.5-flash-lite"
                     ],
-                    value="gemini-2.5-flash",
+                    value=GEMINI_MODEL,
                     info="Choose the Gemini model for summarization"
                 )
                 
@@ -941,11 +978,7 @@ def create_interface():
                     prompt_text = gr.Textbox(
                         label="Gemini Prompt",
                         lines=6,
-                        value="""liveposting, summary detail this stream for me in english
-1. paragraph style, no bullets style
-2. only provide liveposting nothing else, don't talk about you or something else outside the stream
-3. don't mention timestamp of the video
-4. simple english""",
+                        value=DEFAULT_PROMPT,
                         info="Customize how Gemini should summarize the video"
                     )
                 
