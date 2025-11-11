@@ -28,11 +28,15 @@ FFMPEG_RECONNECT_DELAY_MAX = 10                 # Max delay between reconnects (
 FFMPEG_TIMEOUT = 30000000                       # FFmpeg timeout (microseconds, 30s = 30000000)
 
 # Video Encoding Settings (set to 'copy' to record original quality)
-VIDEO_CODEC_MODE = 'copy'                       # 'copy' = original quality, 'encode' = re-encode
-VIDEO_BITRATE = '2M'                            # Video bitrate (only used if VIDEO_CODEC_MODE='encode')
-VIDEO_RESOLUTION = '1080'                       # Video height (only used if VIDEO_CODEC_MODE='encode')
+VIDEO_CODEC_MODE = 'copy'                       # 'copy' = original quality, 'encode' = re-encode with GPU
+VIDEO_BITRATE = '500k'                          # Video bitrate (only used if VIDEO_CODEC_MODE='encode')
+VIDEO_MAXRATE = '500k'                          # Max bitrate for CBR (only used if VIDEO_CODEC_MODE='encode')
+VIDEO_BUFSIZE = '500k'                          # Buffer size for CBR (only used if VIDEO_CODEC_MODE='encode')
+VIDEO_RESOLUTION = '720'                        # Video height (only used if VIDEO_CODEC_MODE='encode')
 VIDEO_FPS = 30                                  # Frames per second (only used if VIDEO_CODEC_MODE='encode')
-AUDIO_BITRATE = '128k'                          # Audio bitrate (only used if VIDEO_CODEC_MODE='encode')
+VIDEO_PRESET = 'fast'                           # h264_nvenc preset (only used if VIDEO_CODEC_MODE='encode')
+VIDEO_RC_MODE = 'cbr'                           # Rate control mode (only used if VIDEO_CODEC_MODE='encode')
+AUDIO_BITRATE = '64k'                           # Audio bitrate (only used if VIDEO_CODEC_MODE='encode')
 
 # Segment Settings
 SEGMENT_STALL_TIMEOUT = 10                       # Seconds to wait before detecting stall
@@ -142,17 +146,17 @@ class LivestreamSummarizerGradio:
             if has_nvenc:
                 self.log_progress("🎮 GPU detected - using h264_nvenc hardware encoding")
                 video_codec_options = [
-                    '-c:v', 'h264_nvenc',
-                    '-preset', 'fast',
-                    '-rc', 'cbr',
-                    '-b:v', VIDEO_BITRATE,
-                    '-maxrate', VIDEO_BITRATE,
-                    '-bufsize', VIDEO_BITRATE,
-                    '-vf', f'scale=-2:{VIDEO_RESOLUTION},fps={VIDEO_FPS}',
+                    '-c:v', 'h264_nvenc',          # NVIDIA hardware-accelerated H.264
+                    '-preset', VIDEO_PRESET,       # Fast preset for maximum speed
+                    '-rc', VIDEO_RC_MODE,          # Constant bitrate for consistent speed
+                    '-b:v', VIDEO_BITRATE,         # Lower bitrate for faster encoding
+                    '-maxrate', VIDEO_MAXRATE,     # Same as target for CBR
+                    '-bufsize', VIDEO_BUFSIZE,     # Smaller buffer for speed
+                    '-vf', f'scale=-2:{VIDEO_RESOLUTION},fps={VIDEO_FPS}',  # Keep scaling for smaller files
                     '-c:a', 'aac',
-                    '-b:a', AUDIO_BITRATE
+                    '-b:a', AUDIO_BITRATE          # Lower audio bitrate for speed
                 ]
-                codec_description = f"{VIDEO_RESOLUTION}p H.264 @ {VIDEO_BITRATE} + {AUDIO_BITRATE} audio"
+                codec_description = f"{VIDEO_RESOLUTION}p H.264 @ {VIDEO_BITRATE} CBR + {AUDIO_BITRATE} audio"
             else:
                 self.log_progress("❌ ERROR: No GPU detected!")
                 self.log_progress("⚠️ GPU (h264_nvenc) is REQUIRED for re-encoding mode")
