@@ -28,7 +28,7 @@ FFMPEG_RECONNECT_DELAY_MAX = 10                 # Max delay between reconnects (
 FFMPEG_TIMEOUT = 30000000                       # FFmpeg timeout (microseconds, 30s = 30000000)
 
 # Video Encoding Settings (set to 'copy' to record original quality)
-VIDEO_CODEC_MODE = 'copy'                       # 'copy' = original quality, 'encode' = re-encode with GPU
+VIDEO_CODEC_MODE = 'encode'                       # 'copy' = original quality, 'encode' = re-encode with GPU
 VIDEO_BITRATE = '500k'                          # Video bitrate (only used if VIDEO_CODEC_MODE='encode')
 VIDEO_MAXRATE = '500k'                          # Max bitrate for CBR (only used if VIDEO_CODEC_MODE='encode')
 VIDEO_BUFSIZE = '500k'                          # Buffer size for CBR (only used if VIDEO_CODEC_MODE='encode')
