@@ -169,25 +169,26 @@ class LivestreamSummarizerGradio:
                     "and restart the runtime."
                 )
         
-        # Use streamlink to pipe stream directly to ffmpeg (auto-refreshes HLS URLs)
-        # streamlink is designed for piping and handles YouTube livestreams better than yt-dlp
+        # Use yt-dlp in passthrough mode to pipe stream directly to ffmpeg
+        # yt-dlp downloads HLS segments and pipes the raw MPEG-TS stream to FFmpeg
         yt_dlp_cmd = [
-            'streamlink',
-            '--stdout',                 # Output to stdout (pipe to FFmpeg)
-            '--stream-segment-threads', '3',  # Use multiple threads for stability
-            '--hls-live-edge', '3',     # Stay 3 segments behind live edge (more stable)
-            '--retry-streams', '5',     # Retry connection up to 5 times
-            '--retry-open', '3',        # Retry opening stream 3 times
-            self.youtube_url,
-            'best'                      # Select best quality stream
+            'yt-dlp',
+            '--format', 'best',
+            '--no-part',
+            '--hls-use-mpegts',          # Force MPEG-TS container (works with pipes)
+            '--concurrent-fragments', '3', # Download 3 fragments in parallel
+            '--output', '-',             # Output to stdout (pipe)
+            '--quiet',
+            '--no-warnings',
+            self.youtube_url
         ]
         
         # FFmpeg reads from yt-dlp's stdout (pipe)
         ffmpeg_cmd = [
             'ffmpeg',
-            '-fflags', '+genpts',      # Generate presentation timestamps
-            '-re',                     # Read input at native frame rate (prevents rushing)
-            '-i', 'pipe:0',            # Read from stdin (yt-dlp's output)
+            '-fflags', '+genpts+discardcorrupt',  # Generate PTS and discard corrupt packets
+            '-thread_queue_size', '512',          # Larger buffer for pipe input
+            '-i', 'pipe:0',                       # Read from stdin (yt-dlp's output)
             '-f', 'segment',
             '-segment_time', str(segment_duration),
             '-segment_start_number', str(start_number),

@@ -3,4 +3,3 @@ schedule
 python-dotenv
 gradio
 yt-dlp
-streamlink
