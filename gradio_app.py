@@ -177,14 +177,16 @@ class LivestreamSummarizerGradio:
             '--no-part',
             '--no-playlist',
             '--no-warnings',
+            '--hls-use-mpegts',       # Use MPEG-TS for livestreams (better for pipes)
             '--quiet',
-            '--output', '-',  # Output to stdout
-            self.youtube_url  # Use original YouTube URL, not HLS URL
+            '--output', '-',          # Output to stdout
+            self.youtube_url          # Use original YouTube URL, not HLS URL
         ]
         
         # FFmpeg reads from yt-dlp's stdout (pipe)
         ffmpeg_cmd = [
             'ffmpeg',
+            '-re',           # Read input at native frame rate (prevents rushing)
             '-i', 'pipe:0',  # Read from stdin (yt-dlp's output)
             '-f', 'segment',
             '-segment_time', str(segment_duration),
