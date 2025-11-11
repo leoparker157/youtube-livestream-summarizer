@@ -40,16 +40,24 @@ VIDEO_DURATION_SECONDS = 300  # 5 minutes
 
 The program will automatically adjust the number of segments and processing accordingly.
 
-### Overlap Settings
+### Configuration Examples
 
-Overlap determines how many segments from the previous cycle are reused in the current cycle. This ensures smooth transitions and prevents missing content at cycle boundaries.
+#### Fast Processing (Quick Summaries)
+- Video Clip Duration: 60 seconds
+- Segment Duration: 10 seconds
+- Overlap: 0 (no overlap between segments)
 
-**Examples:**
-- `overlap_segments = 0`: No overlap - each 120s cycle is completely separate
-- `overlap_segments = 1`: 30s overlap - last 30 seconds of previous cycle becomes first 30 seconds of current cycle
-- `overlap_segments = 2`: 60s overlap - last 60 seconds of previous cycle becomes first 60 seconds of current cycle
+#### Standard Processing (Balanced)
+- Video Clip Duration: 120 seconds
+- Segment Duration: 10 seconds
+- Overlap: 0 (no overlap between segments)
 
-Higher overlap provides better continuity but increases processing time and API usage.
+#### Deep Analysis (Detailed Summaries)
+- Video Clip Duration: 180-300 seconds
+- Segment Duration: 15 seconds
+- Overlap: 1-2 (segments overlap by 15-30 seconds for better context)
+
+**Overlap**: Number of overlapping segments between cycles. Higher overlap provides better context continuity but increases processing time.
 
 ## Prerequisites
 
