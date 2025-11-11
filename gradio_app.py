@@ -173,19 +173,19 @@ class LivestreamSummarizerGradio:
         # This is more reliable than ffmpeg's reconnect for YouTube livestreams
         yt_dlp_cmd = [
             'yt-dlp',
+            '-f', 'best',
             '--no-part',
             '--no-playlist',
-            '--live-from-start',  # Start from beginning of live stream
-            '--hls-use-mpegts',   # Use MPEG-TS for HLS (more reliable for piping)
-            '--output', '-',      # Output to stdout
-            self.youtube_url      # Use original YouTube URL, not HLS URL
+            '--no-warnings',
+            '--quiet',
+            '--output', '-',  # Output to stdout
+            self.youtube_url  # Use original YouTube URL, not HLS URL
         ]
         
         # FFmpeg reads from yt-dlp's stdout (pipe)
         ffmpeg_cmd = [
             'ffmpeg',
-            '-loglevel', 'error',  # Only show errors (suppress frame progress)
-            '-i', 'pipe:0',        # Read from stdin (yt-dlp's output)
+            '-i', 'pipe:0',  # Read from stdin (yt-dlp's output)
             '-f', 'segment',
             '-segment_time', str(segment_duration),
             '-segment_start_number', str(start_number),
@@ -203,9 +203,7 @@ class LivestreamSummarizerGradio:
         yt_dlp_process = subprocess.Popen(
             yt_dlp_cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,  # Capture stderr for diagnostics
-            text=True,
-            bufsize=1024*1024  # 1MB buffer for smoother piping
+            stderr=subprocess.DEVNULL
         )
         
         # Start FFmpeg process (reads from yt-dlp's stdout)
@@ -214,8 +212,7 @@ class LivestreamSummarizerGradio:
             stdin=yt_dlp_process.stdout,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1024*1024  # 1MB buffer for smoother piping
+            text=True
         )
         
         # Store yt-dlp process so we can terminate it later
@@ -572,14 +569,12 @@ class LivestreamSummarizerGradio:
                 
                 if ffmpeg_dead or ytdlp_dead:
                     # Process died - capture diagnostics
-                    if ytdlp_dead:
-                        exit_code = self.yt_dlp_process.returncode
-                        error_msg = f"❌ yt-dlp process died! Exit code: {exit_code}"
-                        which_process = "yt-dlp"
-                    else:
+                    if ffmpeg_dead:
                         exit_code = self.recording_process.returncode
                         error_msg = f"❌ FFmpeg process died! Exit code: {exit_code}"
-                        which_process = "FFmpeg"
+                    else:
+                        exit_code = self.yt_dlp_process.returncode
+                        error_msg = f"❌ yt-dlp process died! Exit code: {exit_code}"
                     
                     yield self.log_progress(""), "\n".join(self.summaries)
                     yield self.log_progress("="*60), "\n".join(self.summaries)
@@ -598,42 +593,19 @@ class LivestreamSummarizerGradio:
                     else:
                         yield self.log_progress(f"� No segments found on disk"), "\n".join(self.summaries)
                     
-                    # Try to get stderr output from the failed process
+                    # Try to get stderr output (read whatever's available without blocking)
                     yield self.log_progress(""), "\n".join(self.summaries)
-                    
-                    # Check yt-dlp stderr first (if it died)
-                    if ytdlp_dead and self.yt_dlp_process and self.yt_dlp_process.stderr:
-                        try:
-                            ytdlp_stderr = self.yt_dlp_process.stderr.read()
-                            if ytdlp_stderr and ytdlp_stderr.strip():
-                                error_lines = [line for line in ytdlp_stderr.strip().split('\n') if line.strip()][-20:]
-                                yield self.log_progress("📋 yt-dlp error output:"), "\n".join(self.summaries)
-                                for line in error_lines:
-                                    yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
-                            else:
-                                yield self.log_progress("📋 (yt-dlp stderr was empty)"), "\n".join(self.summaries)
-                        except Exception as e:
-                            yield self.log_progress(f"📋 Error reading yt-dlp output: {e}"), "\n".join(self.summaries)
-                        yield self.log_progress(""), "\n".join(self.summaries)
-                    
-                    # Then check FFmpeg stderr
                     try:
                         if self.recording_process.stderr:
                             # Read all available stderr (non-blocking)
                             stderr_output = self.recording_process.stderr.read()
                             if stderr_output and stderr_output.strip():
-                                # Filter out frame progress lines and get actual errors
-                                error_lines = [
-                                    line for line in stderr_output.strip().split('\n')
-                                    if line.strip() and not line.strip().startswith('frame=')
-                                ][-20:]  # Last 20 non-frame lines
-                                
-                                if error_lines:
-                                    yield self.log_progress("📋 FFmpeg error output:"), "\n".join(self.summaries)
-                                    for line in error_lines:
+                                # Get last 30 lines of error output for better context
+                                error_lines = stderr_output.strip().split('\n')[-30:]
+                                yield self.log_progress("📋 FFmpeg output (last 30 lines):"), "\n".join(self.summaries)
+                                for line in error_lines:
+                                    if line.strip():  # Skip empty lines
                                         yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
-                                else:
-                                    yield self.log_progress("📋 (Only frame progress in FFmpeg output - no errors)"), "\n".join(self.summaries)
                             else:
                                 yield self.log_progress("📋 (FFmpeg stderr was empty)"), "\n".join(self.summaries)
                         else:
@@ -644,18 +616,18 @@ class LivestreamSummarizerGradio:
                     # Common issue hints
                     yield self.log_progress(""), "\n".join(self.summaries)
                     yield self.log_progress("💡 Diagnosis:"), "\n".join(self.summaries)
-                    yield self.log_progress("  Exit code 0 = Process finished successfully (but prematurely)"), "\n".join(self.summaries)
-                    yield self.log_progress("  This usually means yt-dlp stopped sending data to FFmpeg"), "\n".join(self.summaries)
+                    yield self.log_progress("  Exit code 0 = FFmpeg thinks it finished successfully"), "\n".join(self.summaries)
+                    yield self.log_progress("  This usually means the HLS stream URL EXPIRED"), "\n".join(self.summaries)
                     yield self.log_progress(""), "\n".join(self.summaries)
-                    yield self.log_progress("💡 Possible causes:"), "\n".join(self.summaries)
-                    yield self.log_progress("  1. YouTube rate limiting (too many requests from this IP)"), "\n".join(self.summaries)
-                    yield self.log_progress("  2. yt-dlp crashed or was killed"), "\n".join(self.summaries)
-                    yield self.log_progress("  3. Network connection interrupted"), "\n".join(self.summaries)
+                    yield self.log_progress("💡 Why this happens:"), "\n".join(self.summaries)
+                    yield self.log_progress("  YouTube HLS URLs expire after a few minutes"), "\n".join(self.summaries)
+                    yield self.log_progress("  FFmpeg reaches 'end of stream' when URL expires"), "\n".join(self.summaries)
+                    yield self.log_progress("  We need to re-extract fresh URLs periodically"), "\n".join(self.summaries)
                     yield self.log_progress(""), "\n".join(self.summaries)
-                    yield self.log_progress("💡 Solutions:"), "\n".join(self.summaries)
-                    yield self.log_progress("  1. Try restarting (may get different YouTube server)"), "\n".join(self.summaries)
-                    yield self.log_progress("  2. Wait a few minutes before trying again"), "\n".join(self.summaries)
-                    yield self.log_progress("  3. Check if livestream is still active on YouTube"), "\n".join(self.summaries)
+                    yield self.log_progress("💡 Current workarounds:"), "\n".join(self.summaries)
+                    yield self.log_progress("  1. Use shorter video durations (60-90s instead of 120s)"), "\n".join(self.summaries)
+                    yield self.log_progress("  2. Restart the summarizer every ~2 minutes"), "\n".join(self.summaries)
+                    yield self.log_progress("  3. Wait for automatic URL refresh feature (coming soon)"), "\n".join(self.summaries)
                     break
                 
                 # Check segments
