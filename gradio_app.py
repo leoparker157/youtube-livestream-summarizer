@@ -34,7 +34,7 @@ VIDEO_FPS = 30                                  # Frames per second
 AUDIO_BITRATE = '64k'                           # Audio bitrate (e.g., '64k', '128k')
 
 # Segment Settings
-SEGMENT_STALL_TIMEOUT = 3                       # Seconds to wait before detecting stall
+SEGMENT_STALL_TIMEOUT = 10                       # Seconds to wait before detecting stall
 FFMPEG_RESTART_COOLDOWN = 30                    # Minimum seconds between FFmpeg restarts
 
 # Concatenation & Retry Settings
@@ -166,14 +166,13 @@ class LivestreamSummarizerGradio:
             '-c:v', video_codec,
             '-preset', codec_preset,
         ] + codec_options + [
-            '-vf', f'scale=-2:{VIDEO_RESOLUTION},fps={VIDEO_FPS}',
             '-c:a', 'aac',
             '-b:a', AUDIO_BITRATE,
             '-movflags', '+faststart',
             str(segments_dir / 'segment_%03d.mp4')
         ]
         
-        self.log_progress(f"⚙️ FFmpeg: {VIDEO_RESOLUTION}p H.264 @ {VIDEO_BITRATE} CBR + {AUDIO_BITRATE} audio")
+        self.log_progress(f"⚙️ FFmpeg: Original quality H.264 @ {VIDEO_BITRATE} CBR + {AUDIO_BITRATE} audio")
         # Capture stderr for debugging (but don't print to console)
         self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         time.sleep(5)
