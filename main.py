@@ -830,9 +830,11 @@ def main():
                     timeout=30
                 )
                 if title_result.returncode == 0 and title_result.stdout.strip():
-                    # Sanitize title for filename
+                    # Sanitize title for filename (allow Unicode characters)
                     import re
-                    stream_name = re.sub(r'[^\w\s-]', '', title_result.stdout.strip())
+                    # Remove only characters that are problematic for filenames
+                    # Keep Unicode letters, numbers, spaces, hyphens, underscores
+                    stream_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', title_result.stdout.strip())
                     stream_name = re.sub(r'[-\s]+', '-', stream_name)[:50]  # Limit length
                     print(f"Stream name: {stream_name}")
             except Exception as e:
