@@ -173,11 +173,8 @@ class LivestreamSummarizerGradio:
         # This is more reliable than ffmpeg's reconnect for YouTube livestreams
         yt_dlp_cmd = [
             'yt-dlp',
-            '-f', 'best',
             '--no-part',
             '--no-playlist',
-            '--no-warnings',
-            '--quiet',
             '--live-from-start',  # Start from beginning of live stream
             '--hls-use-mpegts',   # Use MPEG-TS for HLS (more reliable for piping)
             '--output', '-',      # Output to stdout
