@@ -35,7 +35,7 @@ VIDEO_FPS = 30                                  # Frames per second (only used i
 AUDIO_BITRATE = '128k'                          # Audio bitrate (only used if VIDEO_CODEC_MODE='encode')
 
 # Segment Settings
-SEGMENT_STALL_TIMEOUT = 10                       # Seconds to wait before detecting stall
+SEGMENT_STALL_TIMEOUT = 60                       # Seconds to wait before detecting stall (increased from 10)
 FFMPEG_RESTART_COOLDOWN = 30                    # Minimum seconds between FFmpeg restarts
 
 # Concatenation & Retry Settings
@@ -161,7 +161,7 @@ class LivestreamSummarizerGradio:
                     "and restart the runtime."
                 )
         
-        # FFmpeg command with HLS timeout and reconnect options
+        # FFmpeg command with HLS timeout and reconnect options (same as main.py)
         cmd = [
             'ffmpeg',
             # HLS input options for stability
