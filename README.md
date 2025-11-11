@@ -21,7 +21,7 @@ Run on your local machine for full control.
 ## Features
 
 - 🚀 Real-time livestream recording with optimized compression
-- 🤖 AI-powered summarization using Gemini 2.0 Flash
+- 🤖 AI-powered summarization using Gemini
 - ⚡ Speed-optimized for continuous processing
 - 📊 Customizable video duration and segments
 - 🌐 Web interface with Gradio
