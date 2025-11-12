@@ -20,13 +20,9 @@ Run on your local machine for full control.
 
 ## Features
 
-- 🚀 Real-time livestream recording with optimized compression
-- 🤖 AI-powered summarization using Gemini
-- ⚡ Speed-optimized for continuous processing
-- 📊 Customizable video duration and segments
-- 🌐 Web interface with Gradio
-- 📝 Live progress monitoring and summary display
-- 🔄 Continuous background summarization
+-Real-time summarization of livestreams using Gemini
+-Allow customizable encoding, compression, and prompts
+
 
 ## Configuration
 
