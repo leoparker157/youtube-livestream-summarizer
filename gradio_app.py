@@ -177,9 +177,11 @@ class LivestreamSummarizerGradio:
             'yt-dlp',
             '--format', 'best',
             '--no-part',
-            '--hls-use-mpegts',          # Force MPEG-TS container (works with pipes)
-            '--concurrent-fragments', '3', # Download 3 fragments in parallel
-            '--output', '-',             # Output to stdout (pipe)
+            '--hls-use-mpegts',            # Force MPEG-TS container (works with pipes)
+            '--concurrent-fragments', '3',  # Download 3 fragments in parallel
+            '--live-from-start',            # For livestreams: download from current position onwards
+            '--wait-for-video', '10',       # Wait up to 10 seconds for new segments
+            '--output', '-',               # Output to stdout (pipe)
             '--quiet',
             '--no-warnings',
             self.youtube_url
