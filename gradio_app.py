@@ -804,19 +804,7 @@ class LivestreamSummarizerGradio:
                     
                     # Common issue hints
                     yield self.log_progress(""), "\n".join(self.summaries)
-                    yield self.log_progress("💡 Diagnosis:"), "\n".join(self.summaries)
-                    yield self.log_progress("  Exit code 0 = FFmpeg thinks it finished successfully"), "\n".join(self.summaries)
-                    yield self.log_progress("  This usually means the HLS stream URL EXPIRED"), "\n".join(self.summaries)
-                    yield self.log_progress(""), "\n".join(self.summaries)
-                    yield self.log_progress("💡 Why this happens:"), "\n".join(self.summaries)
-                    yield self.log_progress("  YouTube HLS URLs expire after a few minutes"), "\n".join(self.summaries)
-                    yield self.log_progress("  FFmpeg reaches 'end of stream' when URL expires"), "\n".join(self.summaries)
-                    yield self.log_progress("  We need to re-extract fresh URLs periodically"), "\n".join(self.summaries)
-                    yield self.log_progress(""), "\n".join(self.summaries)
-                    yield self.log_progress("💡 Current workarounds:"), "\n".join(self.summaries)
-                    yield self.log_progress("  1. Use shorter video durations (60-90s instead of 120s)"), "\n".join(self.summaries)
-                    yield self.log_progress("  2. Restart the summarizer every ~2 minutes"), "\n".join(self.summaries)
-                    yield self.log_progress("  3. Wait for automatic URL refresh feature (coming soon)"), "\n".join(self.summaries)
+                    yield self.log_progress("⚠️ Stream already ended or program has encountered error, see details above"), "\n".join(self.summaries)
                     break
                 
                 # Check segments
