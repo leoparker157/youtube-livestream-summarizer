@@ -219,8 +219,9 @@ class LivestreamSummarizerGradio:
             text=True
         )
         
-        # Store yt-dlp process so we can terminate it later
-        self.yt_dlp_process = yt_dlp_process
+        # Store commands for error reporting
+        self.ffmpeg_cmd = ffmpeg_cmd
+        self.yt_dlp_cmd = yt_dlp_cmd
         
         # Allow yt-dlp to receive SIGPIPE if FFmpeg exits
         yt_dlp_process.stdout.close()
@@ -653,12 +654,12 @@ class LivestreamSummarizerGradio:
 
                         # Show FFmpeg command that was run
                         yield self.log_progress("🔧 FFmpeg command:"), "\n".join(self.summaries)
-                        yield self.log_progress(f"  {' '.join(ffmpeg_cmd)}"), "\n".join(self.summaries)
+                        yield self.log_progress(f"  {' '.join(self.ffmpeg_cmd)}"), "\n".join(self.summaries)
                         yield self.log_progress(""), "\n".join(self.summaries)
 
                         # Show yt-dlp command that was run
                         yield self.log_progress("🔧 yt-dlp command:"), "\n".join(self.summaries)
-                        yield self.log_progress(f"  {' '.join(yt_dlp_cmd)}"), "\n".join(self.summaries)
+                        yield self.log_progress(f"  {' '.join(self.yt_dlp_cmd)}"), "\n".join(self.summaries)
                         yield self.log_progress(""), "\n".join(self.summaries)
 
                         # Show detailed output
@@ -691,13 +692,13 @@ class LivestreamSummarizerGradio:
                         # Show process resource info if available
                         try:
                             import psutil
-                            if self.recording_process.pid:
+                            if self.recording_process and self.recording_process.pid:
                                 proc = psutil.Process(self.recording_process.pid)
                                 mem_info = proc.memory_info()
                                 cpu_percent = proc.cpu_percent()
                                 yield self.log_progress(f"📊 FFmpeg process stats: CPU {cpu_percent:.1f}%, Memory {mem_info.rss / 1024 / 1024:.1f} MB"), "\n".join(self.summaries)
                         except ImportError:
-                            pass  # psutil not available
+                            yield self.log_progress("📊 (psutil not available for process stats)"), "\n".join(self.summaries)
                         except Exception as e:
                             yield self.log_progress(f"📊 Could not get FFmpeg process stats: {e}"), "\n".join(self.summaries)
 
