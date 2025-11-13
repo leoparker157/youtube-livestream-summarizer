@@ -26,15 +26,28 @@ Run on your local machine for full control.
 
 ## Configuration
 
-You can adjust the video duration sent to Gemini by modifying the `VIDEO_DURATION_SECONDS` constant in `main.py`:
+You can customize the behavior by modifying constants in `main.py`:
 
 ```python
-VIDEO_DURATION_SECONDS = 600  # 10 minutes (default)
-# Or
-VIDEO_DURATION_SECONDS = 300  # 5 minutes
+# Video Processing
+VIDEO_DURATION_SECONDS = 120  # Duration of video clips to send to Gemini (in seconds)
+SEGMENT_DURATION = 60  # Duration of each video segment (minimum 60s to avoid rate limits)
+OVERLAP_SEGMENTS = 0  # Number of overlapping segments between cycles
+
+# Gemini Features
+USE_GOOGLE_SEARCH = False  # Enable/disable Google Search grounding tool
+INCLUDE_PREVIOUS_SUMMARIES = 0  # Number of previous summaries to include as context
+                                # (0 = none, 1+ = include that many for continuity)
 ```
 
 The program will automatically adjust the number of segments and processing accordingly.
+
+**Context Feature**: Set `INCLUDE_PREVIOUS_SUMMARIES` to include previous summaries as context for better continuity. For example:
+- `INCLUDE_PREVIOUS_SUMMARIES = 0` - Each summary is independent (default)
+- `INCLUDE_PREVIOUS_SUMMARIES = 2` - Each summary includes the previous 2 summaries as context
+- `INCLUDE_PREVIOUS_SUMMARIES = 5` - Each summary includes the previous 5 summaries for maximum continuity
+
+This helps Gemini understand ongoing narratives and avoid repeating information.
 
 ### Configuration Examples
 

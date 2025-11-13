@@ -39,6 +39,7 @@ GEMINI_RETRY_DELAY = 30  # Seconds to wait between Gemini retries
 
 # Gemini Configuration
 USE_GOOGLE_SEARCH = False  # Enable/disable Google Search grounding tool in Gemini
+INCLUDE_PREVIOUS_SUMMARIES = 0  # Number of previous summaries to include as context (0 = none, 1+ = include that many for continuity)
 
 # Load environment variables
 load_dotenv()
@@ -126,6 +127,9 @@ class LivestreamSummarizer:
         
         # Processing flag to prevent concurrent cycles
         self.processing = False
+        
+        # Storage for previous summaries (raw text only for context)
+        self.summary_texts_only = []
 
     def start_recording(self):
         """Start FFmpeg to record segments with compression applied during recording."""
@@ -521,13 +525,45 @@ class LivestreamSummarizer:
                 logger.info("Google Search grounding disabled")
                 config = types.GenerateContentConfig()
             
-            # Use custom prompt from instance variable
-            logger.info(f"Using prompt: {self.custom_prompt[:50]}...")
+            # Build prompt with previous summaries if requested
+            final_prompt = self.custom_prompt
+            
+            if INCLUDE_PREVIOUS_SUMMARIES > 0 and len(self.summary_texts_only) > 0:
+                # Validate the number
+                total_summaries = len(self.summary_texts_only)
+                
+                if INCLUDE_PREVIOUS_SUMMARIES > total_summaries:
+                    # Log warning but continue with available summaries
+                    logger.warning(f"Requested {INCLUDE_PREVIOUS_SUMMARIES} previous summaries, but only {total_summaries} available. Using all {total_summaries}.")
+                    include_count = total_summaries
+                else:
+                    include_count = INCLUDE_PREVIOUS_SUMMARIES
+                
+                # Get the requested number of previous summaries (most recent ones)
+                previous_summaries = self.summary_texts_only[-include_count:]
+                
+                # Validate that we actually have summaries
+                if not previous_summaries:
+                    logger.warning("No previous summaries available, proceeding without context.")
+                else:
+                    # Build context section
+                    context_section = "\n\n[PREVIOUS SUMMARIES FOR CONTEXT]\n"
+                    context_section += "=" * 60 + "\n"
+                    for i, prev_summary in enumerate(previous_summaries, 1):
+                        # Ensure summary is not None or empty
+                        if prev_summary and prev_summary.strip():
+                            context_section += f"\nPrevious Summary #{i}:\n{prev_summary}\n"
+                    context_section += "=" * 60 + "\n\n"
+                    
+                    # Insert context before the main prompt
+                    final_prompt = context_section + self.custom_prompt
+                    
+                    logger.info(f"Including {len(previous_summaries)} previous summary/summaries for context")
             
             response = self.client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=[
-                    types.Part.from_text(text=self.custom_prompt),
+                    types.Part.from_text(text=final_prompt),
                     types.Part.from_uri(file_uri=video_file.uri, mime_type=video_file.mime_type)
                 ],
                 config=config
@@ -615,6 +651,9 @@ class LivestreamSummarizer:
         """Append a new summary to the single summary file with stream name."""
         summary_file = Path(f"summary-{self.stream_name}.txt")
         summary_num = self.get_summary_number()
+        
+        # Store raw summary text for context feature
+        self.summary_texts_only.append(summary_text)
         
         # Prepare the entry
         entry = f"#{summary_num} - {timestamp}\n{summary_text}\n\n"
