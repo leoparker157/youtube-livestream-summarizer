@@ -72,6 +72,8 @@ class LivestreamSummarizerGradio:
     def __init__(self):
         self.recording_process = None
         self.yt_dlp_process = None  # yt-dlp process for piping stream
+        self.ffmpeg_cmd = []  # Store FFmpeg command for debugging
+        self.yt_dlp_cmd = []  # Store yt-dlp command for debugging
         self.ffmpeg_stderr = None  # Store FFmpeg stderr for debugging
         self.segment_stall_check_time = None  # Track when we first detected potential stall
         self.last_segment_size = 0  # Track segment size changes
@@ -633,34 +635,36 @@ class LivestreamSummarizerGradio:
                         ytdlp_stderr_content = ""
 
                         # FFmpeg diagnostics
-                        if self.recording_process.stderr:
+                        if self.recording_process and self.recording_process.stderr:
                             try:
                                 ffmpeg_stderr_content = self.recording_process.stderr.read()
                             except:
                                 ffmpeg_stderr_content = "(Could not read FFmpeg stderr)"
 
-                        if self.recording_process.stdout:
+                        if self.recording_process and self.recording_process.stdout:
                             try:
                                 ffmpeg_stdout_content = self.recording_process.stdout.read()
                             except:
                                 ffmpeg_stdout_content = "(Could not read FFmpeg stdout)"
 
                         # yt-dlp diagnostics
-                        if self.yt_dlp_process.stderr:
+                        if self.yt_dlp_process and self.yt_dlp_process.stderr:
                             try:
                                 ytdlp_stderr_content = self.yt_dlp_process.stderr.read()
                             except:
                                 ytdlp_stderr_content = "(Could not read yt-dlp stderr)"
 
                         # Show FFmpeg command that was run
-                        yield self.log_progress("🔧 FFmpeg command:"), "\n".join(self.summaries)
-                        yield self.log_progress(f"  {' '.join(self.ffmpeg_cmd)}"), "\n".join(self.summaries)
-                        yield self.log_progress(""), "\n".join(self.summaries)
+                        if hasattr(self, 'ffmpeg_cmd') and self.ffmpeg_cmd:
+                            yield self.log_progress("🔧 FFmpeg command:"), "\n".join(self.summaries)
+                            yield self.log_progress(f"  {' '.join(self.ffmpeg_cmd)}"), "\n".join(self.summaries)
+                            yield self.log_progress(""), "\n".join(self.summaries)
 
                         # Show yt-dlp command that was run
-                        yield self.log_progress("🔧 yt-dlp command:"), "\n".join(self.summaries)
-                        yield self.log_progress(f"  {' '.join(self.yt_dlp_cmd)}"), "\n".join(self.summaries)
-                        yield self.log_progress(""), "\n".join(self.summaries)
+                        if hasattr(self, 'yt_dlp_cmd') and self.yt_dlp_cmd:
+                            yield self.log_progress("🔧 yt-dlp command:"), "\n".join(self.summaries)
+                            yield self.log_progress(f"  {' '.join(self.yt_dlp_cmd)}"), "\n".join(self.summaries)
+                            yield self.log_progress(""), "\n".join(self.summaries)
 
                         # Show detailed output
                         if ffmpeg_stderr_content and ffmpeg_stderr_content.strip():
