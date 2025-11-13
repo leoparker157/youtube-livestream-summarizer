@@ -84,7 +84,9 @@ class LivestreamSummarizerGradio:
         self.last_end_index = -1
         self.progress_log = []
         self.summaries = []
+        self.summary_texts_only = []  # Store only summary text without formatting
         self.new_summary_available = False  # Flag for background thread updates
+        self.include_previous_summaries = 0  # Dynamic setting for context inclusion
         
     def log_progress(self, message):
         """Add message to progress log"""
@@ -99,7 +101,49 @@ class LivestreamSummarizerGradio:
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         summary_entry = f"📝 Summary at {timestamp}\n{'='*60}\n{summary_text}\n\n"
         self.summaries.append(summary_entry)
+        self.summary_texts_only.append(summary_text)  # Store raw text for context
         return "\n".join(self.summaries)
+    
+    def update_context_setting(self, new_value):
+        """Update the include_previous_summaries setting dynamically"""
+        try:
+            new_value = int(new_value)
+            if new_value < 0:
+                return self.log_progress(f"❌ Invalid value: {new_value}. Must be 0 or greater.")
+            
+            # Safeguard against extremely large numbers
+            if new_value > 100:
+                return self.log_progress(f"❌ Invalid value: {new_value}. Maximum allowed is 100 (to avoid token limits).")
+            
+            # Check if recording is active
+            if not hasattr(self, 'progress_log') or len(self.progress_log) == 0:
+                return self.log_progress(f"⚠️ Please start recording first before updating context settings.")
+            
+            old_value = self.include_previous_summaries
+            
+            # Prevent unnecessary updates
+            if old_value == new_value:
+                return self.log_progress(f"ℹ️ Context setting is already set to {new_value}. No change needed.")
+            
+            self.include_previous_summaries = new_value
+            
+            # Provide helpful context about current state
+            current_summaries = len(self.summary_texts_only)
+            
+            if new_value == 0:
+                message = f"🔄 Context setting updated: {old_value} → {new_value} (no previous summaries will be included)"
+            elif new_value > current_summaries and current_summaries > 0:
+                message = f"🔄 Context setting updated: {old_value} → {new_value} (currently only {current_summaries} summaries available, will use all for now)"
+            elif current_summaries == 0:
+                message = f"🔄 Context setting updated: {old_value} → {new_value} (will take effect once summaries are generated)"
+            else:
+                message = f"🔄 Context setting updated: {old_value} → {new_value} (will include last {new_value} summary/summaries)"
+            
+            return self.log_progress(message)
+        except ValueError:
+            return self.log_progress(f"❌ Invalid input: Must be a number")
+        except Exception as e:
+            return self.log_progress(f"❌ Error updating context setting: {e}")
     
 
     
@@ -375,8 +419,8 @@ class LivestreamSummarizerGradio:
         logger.error(f"Concatenation failed after {max_retries} attempts")
         return False
     
-    def summarize_with_gemini(self, compressed_file, api_key, prompt_text, model_name, use_google_search=False):
-        """Send video to Gemini and get summary"""
+    def summarize_with_gemini(self, compressed_file, api_key, prompt_text, model_name, use_google_search=False, include_previous_summaries=0):
+        """Send video to Gemini and get summary with optional previous context"""
         try:
             client = genai.Client(api_key=api_key)
             
@@ -400,6 +444,39 @@ class LivestreamSummarizerGradio:
             
             self.log_progress("✅ Video uploaded and active")
             
+            # Build prompt with previous summaries if requested
+            final_prompt = prompt_text
+            
+            if include_previous_summaries > 0 and len(self.summary_texts_only) > 0:
+                # Validate the number
+                total_summaries = len(self.summary_texts_only)
+                
+                if include_previous_summaries > total_summaries:
+                    # Log warning but continue with available summaries
+                    self.log_progress(f"⚠️ Requested {include_previous_summaries} previous summaries, but only {total_summaries} available. Using all {total_summaries}.")
+                    include_previous_summaries = total_summaries
+                
+                # Get the requested number of previous summaries (most recent ones)
+                previous_summaries = self.summary_texts_only[-include_previous_summaries:]
+                
+                # Validate that we actually have summaries
+                if not previous_summaries:
+                    self.log_progress(f"⚠️ No previous summaries available, proceeding without context.")
+                else:
+                    # Build context section
+                    context_section = "\n\n[PREVIOUS SUMMARIES FOR CONTEXT]\n"
+                    context_section += "=" * 60 + "\n"
+                    for i, prev_summary in enumerate(previous_summaries, 1):
+                        # Ensure summary is not None or empty
+                        if prev_summary and prev_summary.strip():
+                            context_section += f"\nPrevious Summary #{i}:\n{prev_summary}\n"
+                    context_section += "=" * 60 + "\n\n"
+                    
+                    # Insert context before the main prompt
+                    final_prompt = context_section + prompt_text
+                    
+                    self.log_progress(f"📋 Including {len(previous_summaries)} previous summary/summaries for context")
+            
             # Generate summary with optional Google Search
             if use_google_search:
                 self.log_progress(f"🔍 Generating summary with {model_name} (Google Search enabled)...")
@@ -412,7 +489,7 @@ class LivestreamSummarizerGradio:
             response = client.models.generate_content(
                 model=model_name,
                 contents=[
-                    types.Part.from_text(text=prompt_text),
+                    types.Part.from_text(text=final_prompt),
                     types.Part.from_uri(file_uri=video_file.uri, mime_type=video_file.mime_type)
                 ],
                 config=config
@@ -439,9 +516,17 @@ class LivestreamSummarizerGradio:
             model_name = params['model_name']
             use_google_search = params['use_google_search']
             cycle_count = params['cycle_count']
+            include_previous_summaries = params.get('include_previous_summaries', 0)
             
             self.log_progress("🤖 Sending to Gemini AI (background)...")
-            summary = self.summarize_with_gemini(compressed_file, api_key, prompt_text, model_name, use_google_search)
+            summary = self.summarize_with_gemini(
+                compressed_file, 
+                api_key, 
+                prompt_text, 
+                model_name, 
+                use_google_search,
+                include_previous_summaries
+            )
             
             if summary:
                 self.log_progress(f"✅ Summary #{cycle_count} received")
@@ -512,11 +597,13 @@ class LivestreamSummarizerGradio:
             logger.warning(f"Error during segment cleanup: {e}")
     
     def run_summarizer(self, youtube_url, api_key, video_duration, segment_duration, 
-                       overlap_segments, model_name, prompt_text, use_google_search, progress=gr.Progress()):
+                       overlap_segments, model_name, prompt_text, use_google_search, include_previous_summaries_initial, progress=gr.Progress()):
         """Main summarization loop"""
         self.should_stop = False
         self.progress_log = []
         self.summaries = []
+        self.summary_texts_only = []  # Reset summary text storage
+        self.include_previous_summaries = int(include_previous_summaries_initial)  # Set initial value
         self.last_end_index = -1  # Reset for new run
         self.processing = False  # Reset processing flag
         self.new_summary_available = False  # Reset summary flag
@@ -857,7 +944,8 @@ class LivestreamSummarizerGradio:
                             'prompt_text': prompt_text,
                             'model_name': model_name,
                             'use_google_search': use_google_search,
-                            'cycle_count': cycle_count
+                            'cycle_count': cycle_count,
+                            'include_previous_summaries': self.include_previous_summaries  # Use current instance value
                         }
                         
                         # Start background thread
@@ -1088,6 +1176,14 @@ def create_interface():
                         value=False,
                         info="Allow Gemini to use Google Search for more context (may increase processing time)"
                     )
+                    
+                    include_previous_summaries = gr.Number(
+                        label="Include Previous Summaries",
+                        value=0,
+                        minimum=0,
+                        step=1,
+                        info="Number of previous summaries to include as context (0 = none, 1+ = include that many, useful for continuity)"
+                    )
                 
                 with gr.Accordion("✏️ Custom Prompt", open=True):
                     prompt_text = gr.Textbox(
@@ -1100,6 +1196,19 @@ def create_interface():
                 with gr.Row():
                     start_btn = gr.Button("▶️ Start Recording & Summarizing", variant="primary", size="lg")
                     stop_btn = gr.Button("⏹️ Stop", variant="stop", size="lg")
+                
+                with gr.Accordion("🔄 Dynamic Settings (Change During Recording)", open=False):
+                    gr.Markdown("**Update Context Setting While Recording**")
+                    with gr.Row():
+                        context_update_input = gr.Number(
+                            label="New Context Value",
+                            value=0,
+                            minimum=0,
+                            step=1,
+                            scale=3
+                        )
+                        context_update_btn = gr.Button("📝 Update Context", variant="secondary", scale=1)
+                    gr.Markdown("*This will take effect on the next summary cycle without interrupting the current recording.*")
         
         with gr.Row():
             with gr.Column(scale=1):
@@ -1138,12 +1247,18 @@ def create_interface():
         # Event handlers
         start_btn.click(
             fn=summarizer.run_summarizer,
-            inputs=[youtube_url, api_key, video_duration, segment_duration, overlap_segments, model_name, prompt_text, use_google_search],
+            inputs=[youtube_url, api_key, video_duration, segment_duration, overlap_segments, model_name, prompt_text, use_google_search, include_previous_summaries],
             outputs=[progress_output, summary_output]
         )
         
         stop_btn.click(
             fn=summarizer.stop_recording,
+            outputs=[progress_output]
+        )
+        
+        context_update_btn.click(
+            fn=summarizer.update_context_setting,
+            inputs=[context_update_input],
             outputs=[progress_output]
         )
     
