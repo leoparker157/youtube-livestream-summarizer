@@ -24,6 +24,13 @@ NUM_SEGMENTS = VIDEO_DURATION_SECONDS // SEGMENT_DURATION  # Number of segments 
 OVERLAP_SEGMENTS = 0  # Number of overlapping segments between cycles
 OVERLAP_SECONDS = OVERLAP_SEGMENTS * SEGMENT_DURATION  # Duration of overlap (calculated)
 
+# Validate segment duration to prevent Gemini rate limit issues
+if SEGMENT_DURATION < 60:
+    print(f"❌ Error: SEGMENT_DURATION must be at least 60 seconds to avoid Gemini API rate limits.")
+    print(f"Current value: {SEGMENT_DURATION} seconds")
+    print(f"Please change SEGMENT_DURATION in the script to 60 or more.")
+    sys.exit(1)
+
 # Retry Configuration
 FFMPEG_MAX_RETRIES = 3  # Number of retries for FFmpeg operations (concatenation, compression)
 FFMPEG_RETRY_DELAY = 120  # Seconds to wait between FFmpeg retries (2 minutes)

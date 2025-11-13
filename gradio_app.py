@@ -599,6 +599,12 @@ class LivestreamSummarizerGradio:
     def run_summarizer(self, youtube_url, api_key, video_duration, segment_duration, 
                        overlap_segments, model_name, prompt_text, use_google_search, include_previous_summaries_initial, progress=gr.Progress()):
         """Main summarization loop"""
+        # Validate segment duration to prevent Gemini rate limit issues
+        if segment_duration < 60:
+            error_msg = f"❌ Error: Segment duration must be at least 60 seconds to avoid Gemini API rate limits.\nCurrent value: {segment_duration} seconds\nPlease increase the segment duration to 60 or more."
+            yield self.log_progress(error_msg), ""
+            return
+        
         self.should_stop = False
         self.progress_log = []
         self.summaries = []
@@ -1155,11 +1161,11 @@ def create_interface():
                     
                     segment_duration = gr.Slider(
                         label="Segment Duration (seconds)",
-                        minimum=5,
-                        maximum=60,
-                        value=10,
-                        step=5,
-                        info="Duration of each recording segment"
+                        minimum=60,
+                        maximum=120,
+                        value=60,
+                        step=10,
+                        info="Duration of each recording segment (minimum 60s to avoid Gemini rate limits)"
                     )
                     
                     overlap_segments = gr.Slider(
