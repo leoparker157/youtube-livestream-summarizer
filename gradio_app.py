@@ -188,6 +188,7 @@ class LivestreamSummarizerGradio:
             'ffmpeg',
             '-fflags', '+genpts+discardcorrupt',  # Generate PTS and discard corrupt packets
             '-thread_queue_size', '512',          # Larger buffer for pipe input
+            '-v', 'verbose',                       # Verbose logging for debugging
             '-i', 'pipe:0',                       # Read from stdin (yt-dlp's output)
             '-f', 'segment',
             '-segment_time', str(segment_duration),
@@ -206,14 +207,14 @@ class LivestreamSummarizerGradio:
         yt_dlp_process = subprocess.Popen(
             yt_dlp_cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.PIPE,  # Capture stderr for debugging
         )
         
         # Start FFmpeg process (reads from yt-dlp's stdout)
         self.recording_process = subprocess.Popen(
             ffmpeg_cmd,
             stdin=yt_dlp_process.stdout,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,  # Capture stdout for debugging
             stderr=subprocess.PIPE,
             text=True
         )
@@ -596,25 +597,112 @@ class LivestreamSummarizerGradio:
                     else:
                         yield self.log_progress(f"� No segments found on disk"), "\n".join(self.summaries)
                     
+                if ffmpeg_dead or ytdlp_dead:
+                    # Process died - capture diagnostics
+                    if ffmpeg_dead:
+                        exit_code = self.recording_process.returncode
+                        error_msg = f"❌ FFmpeg process died! Exit code: {exit_code}"
+                    else:
+                        exit_code = self.yt_dlp_process.returncode
+                        error_msg = f"❌ yt-dlp process died! Exit code: {exit_code}"
+                    
+                    yield self.log_progress(""), "\n".join(self.summaries)
+                    yield self.log_progress("="*60), "\n".join(self.summaries)
+                    yield self.log_progress(error_msg), "\n".join(self.summaries)
+                    yield self.log_progress(f"🔍 Cycle: {cycle_count}"), "\n".join(self.summaries)
+                    yield self.log_progress(f"🔍 Last segment index: {self.last_end_index}"), "\n".join(self.summaries)
+                    
+                    # Check what segments exist
+                    segments = list(segments_dir.glob('segment_*.mp4'))
+                    if segments:
+                        segment_list = sorted([seg.name for seg in segments])
+                        segment_sizes = [(seg.name, seg.stat().st_size / (1024*1024)) for seg in sorted(segments)]
+                        yield self.log_progress(f"🔍 Segments on disk: {len(segments)}"), "\n".join(self.summaries)
+                        for name, size in segment_sizes:
+                            yield self.log_progress(f"     {name}: {size:.2f} MB"), "\n".join(self.summaries)
+                    else:
+                        yield self.log_progress(f"� No segments found on disk"), "\n".join(self.summaries)
+                    
                     # Try to get stderr output (read whatever's available without blocking)
                     yield self.log_progress(""), "\n".join(self.summaries)
                     try:
+                        # Capture both stdout and stderr for more complete diagnostics
+                        ffmpeg_stderr_content = ""
+                        ffmpeg_stdout_content = ""
+                        ytdlp_stderr_content = ""
+
+                        # FFmpeg diagnostics
                         if self.recording_process.stderr:
-                            # Read all available stderr (non-blocking)
-                            stderr_output = self.recording_process.stderr.read()
-                            if stderr_output and stderr_output.strip():
-                                # Get last 30 lines of error output for better context
-                                error_lines = stderr_output.strip().split('\n')[-30:]
-                                yield self.log_progress("📋 FFmpeg output (last 30 lines):"), "\n".join(self.summaries)
-                                for line in error_lines:
-                                    if line.strip():  # Skip empty lines
-                                        yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
-                            else:
-                                yield self.log_progress("📋 (FFmpeg stderr was empty)"), "\n".join(self.summaries)
+                            try:
+                                ffmpeg_stderr_content = self.recording_process.stderr.read()
+                            except:
+                                ffmpeg_stderr_content = "(Could not read FFmpeg stderr)"
+
+                        if self.recording_process.stdout:
+                            try:
+                                ffmpeg_stdout_content = self.recording_process.stdout.read()
+                            except:
+                                ffmpeg_stdout_content = "(Could not read FFmpeg stdout)"
+
+                        # yt-dlp diagnostics
+                        if self.yt_dlp_process.stderr:
+                            try:
+                                ytdlp_stderr_content = self.yt_dlp_process.stderr.read()
+                            except:
+                                ytdlp_stderr_content = "(Could not read yt-dlp stderr)"
+
+                        # Show FFmpeg command that was run
+                        yield self.log_progress("🔧 FFmpeg command:"), "\n".join(self.summaries)
+                        yield self.log_progress(f"  {' '.join(ffmpeg_cmd)}"), "\n".join(self.summaries)
+                        yield self.log_progress(""), "\n".join(self.summaries)
+
+                        # Show yt-dlp command that was run
+                        yield self.log_progress("🔧 yt-dlp command:"), "\n".join(self.summaries)
+                        yield self.log_progress(f"  {' '.join(yt_dlp_cmd)}"), "\n".join(self.summaries)
+                        yield self.log_progress(""), "\n".join(self.summaries)
+
+                        # Show detailed output
+                        if ffmpeg_stderr_content and ffmpeg_stderr_content.strip():
+                            # Show last 50 lines of FFmpeg stderr for better context
+                            error_lines = ffmpeg_stderr_content.strip().split('\n')[-50:]
+                            yield self.log_progress("📋 FFmpeg stderr (last 50 lines):"), "\n".join(self.summaries)
+                            for line in error_lines:
+                                if line.strip():
+                                    yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
                         else:
-                            yield self.log_progress("📋 (FFmpeg stderr not available)"), "\n".join(self.summaries)
+                            yield self.log_progress("📋 (FFmpeg stderr was empty)"), "\n".join(self.summaries)
+
+                        if ffmpeg_stdout_content and ffmpeg_stdout_content.strip():
+                            # Show last 20 lines of FFmpeg stdout
+                            output_lines = ffmpeg_stdout_content.strip().split('\n')[-20:]
+                            yield self.log_progress("📋 FFmpeg stdout (last 20 lines):"), "\n".join(self.summaries)
+                            for line in output_lines:
+                                if line.strip():
+                                    yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
+
+                        if ytdlp_stderr_content and ytdlp_stderr_content.strip():
+                            # Show last 20 lines of yt-dlp stderr
+                            ytdlp_lines = ytdlp_stderr_content.strip().split('\n')[-20:]
+                            yield self.log_progress("📋 yt-dlp stderr (last 20 lines):"), "\n".join(self.summaries)
+                            for line in ytdlp_lines:
+                                if line.strip():
+                                    yield self.log_progress(f"  {line}"), "\n".join(self.summaries)
+
+                        # Show process resource info if available
+                        try:
+                            import psutil
+                            if self.recording_process.pid:
+                                proc = psutil.Process(self.recording_process.pid)
+                                mem_info = proc.memory_info()
+                                cpu_percent = proc.cpu_percent()
+                                yield self.log_progress(f"📊 FFmpeg process stats: CPU {cpu_percent:.1f}%, Memory {mem_info.rss / 1024 / 1024:.1f} MB"), "\n".join(self.summaries)
+                        except ImportError:
+                            pass  # psutil not available
+                        except Exception as e:
+                            yield self.log_progress(f"📊 Could not get FFmpeg process stats: {e}"), "\n".join(self.summaries)
+
                     except Exception as e:
-                        yield self.log_progress(f"📋 Error reading FFmpeg output: {e}"), "\n".join(self.summaries)
+                        yield self.log_progress(f"📋 Error reading process output: {e}"), "\n".join(self.summaries)
                     
                     # Common issue hints
                     yield self.log_progress(""), "\n".join(self.summaries)
