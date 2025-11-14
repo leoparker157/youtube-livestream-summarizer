@@ -55,11 +55,7 @@ GEMINI_POLL_INTERVAL = 5                        # Seconds between processing sta
 GEMINI_MODEL = 'gemini-2.5-flash'              # Gemini model name
 
 # Default Prompt
-DEFAULT_PROMPT = """liveposting, summary detail this stream for me in english
-1. paragraph style, no bullets style
-2. only provide liveposting nothing else, don't talk about you or something else outside the stream
-3. don't mention timestamp of the video
-4. simple english"""
+DEFAULT_PROMPT = """summary detail this clip for me in english"""
 # =================================================================
 
 # Configure logging
