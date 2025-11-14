@@ -18,7 +18,7 @@ import google.genai as genai
 from google.genai import types
 
 # Configuration Constants
-VIDEO_DURATION_SECONDS = 120  # Duration of video clips to send to Gemini (in seconds)
+VIDEO_DURATION_SECONDS = 600  # Duration of video clips to send to Gemini (in seconds)
 SEGMENT_DURATION = 30  # Duration of each video segment (in seconds)
 NUM_SEGMENTS = VIDEO_DURATION_SECONDS // SEGMENT_DURATION  # Number of segments needed
 OVERLAP_SEGMENTS = 0  # Number of overlapping segments between cycles
@@ -121,6 +121,7 @@ class LivestreamSummarizer:
 
         # FFmpeg processes
         self.recording_process = None
+        self.recording_start_time = None
         
         # Overlap tracking
         self.last_end_index = -1  # Index of last segment used in previous cycle
@@ -183,7 +184,8 @@ class LivestreamSummarizer:
         logger.info("Starting FFmpeg recording process with compression...")
         logger.info(f"Recording compressed segments to {self.segments_dir} ({SEGMENT_DURATION}s each)")
         logger.info("Compression settings: 720p H.264 @ 500k CBR video + 64k audio (optimized for speed)")
-        self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.recording_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.recording_start_time = time.time()
         time.sleep(5)  # Wait for segments to start
         logger.info("Recording started successfully")
 
@@ -737,6 +739,90 @@ class LivestreamSummarizer:
         
         logger.info("=== Summarization cycle started (running in background) ===")
 
+    def process_remaining_segments(self):
+        """Process any remaining segments when stream ends.
+        
+        This creates a final summary from leftover segments that weren't 
+        processed in regular cycles.
+        """
+        logger.info("=== Processing remaining segments for final summary ===")
+        
+        # Wait for any ongoing processing to complete
+        while self.processing:
+            logger.info("Waiting for current processing to complete...")
+            time.sleep(2)
+        
+        segments = sorted(self.segments_dir.glob('segment_*.mp4'))
+        if not segments:
+            logger.info("No remaining segments to process")
+            return
+        
+        # Get segments that haven't been processed yet
+        if self.last_end_index >= 0:
+            remaining_segments = [seg for seg in segments 
+                                 if int(seg.stem.split('_')[1]) > self.last_end_index]
+        else:
+            # No cycles completed, process all segments
+            remaining_segments = segments
+        
+        if not remaining_segments:
+            logger.info("All segments have been processed")
+            return
+        
+        logger.info(f"Found {len(remaining_segments)} unprocessed segments")
+        
+        # Create concat file with remaining segments
+        with open(self.concat_file, 'w') as f:
+            for seg in remaining_segments:
+                f.write(f"file '{seg}'\n")
+        
+        logger.info(f"Final concat file created with segments: {remaining_segments[0].name} to {remaining_segments[-1].name}")
+        
+        # Concatenate remaining segments
+        logger.info("Concatenating remaining segments...")
+        cmd = [
+            'ffmpeg',
+            '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', str(self.concat_file),
+            '-c', 'copy',
+            str(self.compressed_file)
+        ]
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                logger.error(f"Failed to concatenate remaining segments: {result.stderr}")
+                return
+            
+            logger.info("Remaining segments concatenated successfully")
+            
+            # Summarize the final video
+            logger.info("Generating final summary...")
+            summary = self.summarize_with_gemini()
+            
+            if summary:
+                timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+                logger.info(f"Final summary received at {timestamp}")
+                print(f"\n--- FINAL Summary at {timestamp} ---\n{summary}\n")
+                summary_num = self.append_summary(summary, timestamp)
+                print(f"✅ Final summary #{summary_num} saved to summary-{self.stream_name}.txt")
+            else:
+                logger.error("Failed to generate final summary")
+            
+            # Clean up
+            if self.compressed_file.exists():
+                self.compressed_file.unlink()
+                logger.info("Deleted final compressed file")
+                
+        except subprocess.TimeoutExpired:
+            logger.error("Timeout while concatenating remaining segments")
+        except Exception as e:
+            logger.error(f"Error processing remaining segments: {e}")
+        
+        logger.info("=== Final summary processing completed ===")
+
     def _background_summarization(self):
         """Background thread for video processing and Gemini summarization.
         
@@ -797,25 +883,104 @@ class LivestreamSummarizer:
         last_segment_count = 0
         last_size_update = 0
         current_recording_size = 0
+        no_growth_start = None
+        last_max_index = -1
         
         try:
             while True:
                 schedule.run_pending()  # Keep for any other scheduled tasks
+                
+                # Check if FFmpeg process has exited (stream ended)
+                if self.recording_process and self.recording_process.poll() is not None:
+                    print()  # New line after the recording status
+                    exit_code = self.recording_process.returncode
+                    runtime = time.time() - self.recording_start_time if self.recording_start_time else 0
+                    
+                    # Get stderr output to check for errors
+                    try:
+                        _, stderr_output = self.recording_process.communicate(timeout=5)
+                        stderr_text = stderr_output.decode('utf-8', errors='ignore') if stderr_output else ""
+                    except:
+                        stderr_text = ""
+                    
+                    # Determine if this was a clean exit or an error
+                    is_error = False
+                    error_indicators = [
+                        "Connection refused",
+                        "Server returned 404",
+                        "Server returned 403",
+                        "Invalid data found",
+                        "Immediate exit requested",
+                        "Conversion failed",
+                        "Error",
+                        "moov atom not found"
+                    ]
+                    
+                    # Check if FFmpeg exited too quickly (likely an error)
+                    if runtime < 30:
+                        is_error = True
+                        logger.warning(f"FFmpeg exited after only {runtime:.1f} seconds - likely an error")
+                    
+                    # Check stderr for error messages
+                    if stderr_text:
+                        for indicator in error_indicators:
+                            if indicator.lower() in stderr_text.lower():
+                                is_error = True
+                                logger.error(f"FFmpeg error detected: {indicator}")
+                                break
+                    
+                    if is_error:
+                        logger.error(f"FFmpeg process exited with code {exit_code} due to an error")
+                        if stderr_text:
+                            # Show last 500 characters of stderr
+                            logger.error(f"FFmpeg stderr (last 500 chars):\n{stderr_text[-500:]}")
+                            print(f"\n❌ FFmpeg Error:\n{stderr_text[-500:]}\n")
+                        logger.error("Recording failed. Please check the stream URL and try again.")
+                        break
+                    else:
+                        logger.info(f"FFmpeg process exited cleanly with code {exit_code} after {runtime:.1f} seconds")
+                        logger.info("Stream has ended naturally, processing remaining segments...")
+                        
+                        # Wait a moment for any final segments to be written
+                        time.sleep(3)
+                        
+                        # Process any remaining segments
+                        self.process_remaining_segments()
+                        
+                        logger.info("All processing completed. Exiting.")
+                        break
                 
                 # Check and log segment accumulation progress
                 segments = list(self.segments_dir.glob('segment_*.mp4'))
                 current_count = len(segments)
                 
                 # Calculate required max index for next cycle
+                current_max_index = -1
                 if segments:
                     try:
-                        max_index = max(int(seg.stem.split('_')[1]) for seg in segments if seg.stem.split('_')[1].isdigit())
+                        current_max_index = max(int(seg.stem.split('_')[1]) for seg in segments if seg.stem.split('_')[1].isdigit())
+                        
+                        # Detect stalled recording (no new segments for 60 seconds)
+                        if current_max_index == last_max_index:
+                            if no_growth_start is None:
+                                no_growth_start = time.time()
+                            elif time.time() - no_growth_start > 60:
+                                print()  # New line after the recording status
+                                logger.warning("No new segments detected for 60 seconds, stream may have ended")
+                                logger.info("Processing remaining segments...")
+                                self.process_remaining_segments()
+                                logger.info("All processing completed. Exiting.")
+                                break
+                        else:
+                            no_growth_start = None
+                            last_max_index = current_max_index
+                        
                         if self.last_end_index == -1:
                             required_max_index = NUM_SEGMENTS - 1
                         else:
                             required_max_index = self.last_end_index + NUM_SEGMENTS - OVERLAP_SEGMENTS
                         
-                        if max_index >= required_max_index and not self.processing:
+                        if current_max_index >= required_max_index and not self.processing:
                             cycle_count += 1
                             logger.info(f"Starting summarization cycle #{cycle_count}")
                             self.process_and_summarize()
@@ -849,6 +1014,8 @@ class LivestreamSummarizer:
             print()  # New line after the recording status
             logger.info("Stopping...")
             self.stop_recording()
+            logger.info("Processing any remaining segments...")
+            self.process_remaining_segments()
 
 def main():
     if len(sys.argv) < 2 or len(sys.argv) > 3:
