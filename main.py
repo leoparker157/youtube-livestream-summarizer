@@ -24,11 +24,11 @@ NUM_SEGMENTS = VIDEO_DURATION_SECONDS // SEGMENT_DURATION  # Number of segments 
 OVERLAP_SEGMENTS = 0  # Number of overlapping segments between cycles
 OVERLAP_SECONDS = OVERLAP_SEGMENTS * SEGMENT_DURATION  # Duration of overlap (calculated)
 
-# Validate segment duration to prevent Gemini rate limit issues
-if SEGMENT_DURATION < 60:
-    print(f"❌ Error: SEGMENT_DURATION must be at least 60 seconds to avoid Gemini API rate limits.")
-    print(f"Current value: {SEGMENT_DURATION} seconds")
-    print(f"Please change SEGMENT_DURATION in the script to 60 or more.")
+# Validate video duration to prevent Gemini rate limit issues
+if VIDEO_DURATION_SECONDS < 60:
+    print(f"❌ Error: VIDEO_DURATION_SECONDS must be at least 60 seconds to avoid Gemini API rate limits.")
+    print(f"Current value: {VIDEO_DURATION_SECONDS} seconds")
+    print(f"Please change VIDEO_DURATION_SECONDS in the script to 60 or more.")
     sys.exit(1)
 
 # Retry Configuration
@@ -39,7 +39,7 @@ GEMINI_RETRY_DELAY = 30  # Seconds to wait between Gemini retries
 
 # Gemini Configuration
 USE_GOOGLE_SEARCH = False  # Enable/disable Google Search grounding tool in Gemini
-INCLUDE_PREVIOUS_SUMMARIES = 0  # Number of previous summaries to include as context (0 = none, 1+ = include that many for continuity)
+INCLUDE_PREVIOUS_SUMMARIES = 3  # Number of previous summaries to include as context (0 = none, 1+ = include that many for continuity)
 
 # Load environment variables
 load_dotenv()
