@@ -68,6 +68,9 @@ class LivestreamSummarizerGradio:
     def __init__(self):
         self.recording_process = None
         self.yt_dlp_process = None  # yt-dlp process for piping stream
+        self.is_vod = False  # Track if current recording is VOD
+        self.last_gemini_call_time = 0  # For VOD rate limiting
+        self.program_start_time = 0  # Track program runtime for elapsed time display
         self.ffmpeg_cmd = []  # Store FFmpeg command for debugging
         self.yt_dlp_cmd = []  # Store yt-dlp command for debugging
         self.ffmpeg_stderr = None  # Store FFmpeg stderr for debugging
@@ -95,7 +98,15 @@ class LivestreamSummarizerGradio:
     def add_summary(self, summary_text):
         """Add summary to summaries list"""
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-        summary_entry = f"📝 Summary at {timestamp}\n{'='*60}\n{summary_text}\n\n"
+        
+        # Calculate elapsed time
+        elapsed_seconds = int(time.time() - self.program_start_time)
+        hours = elapsed_seconds // 3600
+        minutes = (elapsed_seconds % 3600) // 60
+        seconds = elapsed_seconds % 60
+        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        
+        summary_entry = f"📝 Summary at {timestamp} (Elapsed: {elapsed_str})\n{'='*60}\n{summary_text}\n\n"
         self.summaries.append(summary_entry)
         self.summary_texts_only.append(summary_text)  # Store raw text for context
         return "\n".join(self.summaries)
@@ -524,6 +535,10 @@ class LivestreamSummarizerGradio:
                 include_previous_summaries
             )
             
+            # Record Gemini API call time for VOD rate limiting
+            if self.is_vod:
+                self.last_gemini_call_time = time.time()
+            
             if summary:
                 self.log_progress(f"✅ Summary #{cycle_count} received")
                 self.add_summary(summary)
@@ -614,6 +629,29 @@ class LivestreamSummarizerGradio:
         self.ffmpeg_restart_count = 0  # Reset restart counter
         self.last_restart_time = 0  # Reset restart time
         self.youtube_url = youtube_url  # Store for FFmpeg restart
+        self.is_vod = False  # Reset VOD flag
+        self.last_gemini_call_time = 0  # Reset rate limiting
+        
+        # Detect if VOD or live stream
+        if 'youtube.com' in youtube_url or 'youtu.be' in youtube_url:
+            yield self.log_progress("🔍 Detecting if live or VOD..."), ""
+            try:
+                check_result = subprocess.run(
+                    ['yt-dlp', '--print', '%(is_live)s', youtube_url],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if check_result.returncode == 0:
+                    is_live_str = check_result.stdout.strip().lower()
+                    self.is_vod = is_live_str in ['false', 'none', '']
+                    if self.is_vod:
+                        yield self.log_progress("✓ Detected VOD (Video On Demand) - will apply 2-minute rate limiting"), ""
+                    else:
+                        yield self.log_progress("✓ Detected Live Stream"), ""
+            except Exception as e:
+                yield self.log_progress(f"⚠️ Could not determine if live/VOD: {e}, assuming live"), ""
+                self.is_vod = False
         
         # Setup directories
         script_dir = Path.cwd()
@@ -648,6 +686,9 @@ class LivestreamSummarizerGradio:
         # Start recording (no need to extract HLS URL - yt-dlp handles that internally)
         yield self.log_progress("🎬 Starting FFmpeg recording with yt-dlp stream..."), ""
         try:
+            # Initialize program start time for elapsed tracking
+            self.program_start_time = time.time()
+            
             self.start_recording(None, segment_duration, segments_dir)
             yield self.log_progress(f"✅ Recording started (segments: {segment_duration}s each)"), ""
             yield self.log_progress(f"✅ Using yt-dlp pipe for continuous HLS refresh"), ""
@@ -824,6 +865,21 @@ class LivestreamSummarizerGradio:
                             required_max_index = self.last_end_index + num_segments - overlap_segments
                         
                         can_process = max_index >= required_max_index and not self.processing
+                        
+                        # VOD rate limiting: Check 2-minute cooldown
+                        if can_process and self.is_vod:
+                            time_since_last_call = time.time() - self.last_gemini_call_time
+                            if self.last_gemini_call_time > 0 and time_since_last_call < 120:
+                                wait_time = 120 - time_since_last_call
+                                # Calculate elapsed time
+                                elapsed_seconds = int(time.time() - self.program_start_time)
+                                hours = elapsed_seconds // 3600
+                                minutes = (elapsed_seconds % 3600) // 60
+                                seconds = elapsed_seconds % 60
+                                elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                                yield self.log_progress(f"⏳ VOD rate limiting: {wait_time:.0f}s until next Gemini call... | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
+                                can_process = False  # Skip this cycle
+                        
                     except (ValueError, StopIteration):
                         # If parsing fails, we still have segments, just can't get max index
                         current_count = len(segments)
@@ -855,7 +911,13 @@ class LivestreamSummarizerGradio:
                     # Wait for NEXT segment to start (proves all cycle segments are complete)
                     next_segment_index = end_index + 1
                     next_segment_path = segments_dir / f"segment_{next_segment_index:03d}.mp4"
-                    yield self.log_progress(f"⏳ Waiting for next segment {next_segment_path.name} to start..."), "\n".join(self.summaries)
+                    # Calculate elapsed time
+                    elapsed_seconds = int(time.time() - self.program_start_time)
+                    hours = elapsed_seconds // 3600
+                    minutes = (elapsed_seconds % 3600) // 60
+                    seconds = elapsed_seconds % 60
+                    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                    yield self.log_progress(f"⏳ Waiting for next segment {next_segment_path.name} to start... | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
                     
                     wait_start = time.time()
                     wait_timeout = segment_duration * 2  # 2x segment duration
@@ -877,7 +939,13 @@ class LivestreamSummarizerGradio:
                                     last_cycle_size = current_size
                                     finalizing_stall_start = None
                                     size_mb = current_size / (1024 * 1024)
-                                    yield self.log_progress(f"🔄 Finalizing: {last_segment_path.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                                    # Calculate elapsed time
+                                    elapsed_seconds = int(time.time() - self.program_start_time)
+                                    hours = elapsed_seconds // 3600
+                                    minutes = (elapsed_seconds % 3600) // 60
+                                    seconds = elapsed_seconds % 60
+                                    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                                    yield self.log_progress(f"🔄 Finalizing: {last_segment_path.name} ({size_mb:.1f} MB) | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
                                 else:
                                     # Size hasn't changed - check for stall
                                     if finalizing_stall_start is None:
@@ -908,7 +976,13 @@ class LivestreamSummarizerGradio:
                         time.sleep(0.5)
                     else:
                         # Timeout - but continue anyway (segments should be ready)
-                        yield self.log_progress(f"⏳ {next_segment_path.name} not started yet, proceeding with current segments..."), "\n".join(self.summaries)
+                        # Calculate elapsed time
+                        elapsed_seconds = int(time.time() - self.program_start_time)
+                        hours = elapsed_seconds // 3600
+                        minutes = (elapsed_seconds % 3600) // 60
+                        seconds = elapsed_seconds % 60
+                        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                        yield self.log_progress(f"⏳ {next_segment_path.name} not started yet, proceeding with current segments... | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
                     
                     # Get segment files for concatenation
                     segment_files = [segments_dir / f"segment_{i:03d}.mp4" for i in range(start_index, end_index + 1)]
@@ -998,20 +1072,50 @@ class LivestreamSummarizerGradio:
                                 
                                 if max_index >= needed_index:
                                     # We're ready to process, show finalizing status
-                                    yield self.log_progress(f"🔄 Finalizing: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                                    # Calculate elapsed time
+                                    elapsed_seconds = int(time.time() - self.program_start_time)
+                                    hours = elapsed_seconds // 3600
+                                    minutes = (elapsed_seconds % 3600) // 60
+                                    seconds = elapsed_seconds % 60
+                                    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                                    yield self.log_progress(f"🔄 Finalizing: {current_segment.name} ({size_mb:.1f} MB) | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
                                 else:
                                     # Still waiting, show progress
                                     remaining = needed_index - max_index
-                                    yield self.log_progress(f"⏳ Waiting for {remaining} more segments... | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                                    # Calculate elapsed time
+                                    elapsed_seconds = int(time.time() - self.program_start_time)
+                                    hours = elapsed_seconds // 3600
+                                    minutes = (elapsed_seconds % 3600) // 60
+                                    seconds = elapsed_seconds % 60
+                                    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                                    yield self.log_progress(f"⏳ Waiting for {remaining} more segments... | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB) | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
                             else:
                                 # No valid max_index yet, but show current recording
-                                yield self.log_progress(f"⏳ Accumulating segments ({current_count}/{num_segments})... | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB)"), "\n".join(self.summaries)
+                                # Calculate elapsed time
+                                elapsed_seconds = int(time.time() - self.program_start_time)
+                                hours = elapsed_seconds // 3600
+                                minutes = (elapsed_seconds % 3600) // 60
+                                seconds = elapsed_seconds % 60
+                                elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                                yield self.log_progress(f"⏳ Accumulating segments ({current_count}/{num_segments})... | 📹 Recording: {current_segment.name} ({size_mb:.1f} MB) | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
                         except (ValueError, OSError, ZeroDivisionError) as e:
                             # Fallback if we can't get segment info
-                            yield self.log_progress(f"⏳ Waiting for segments... ({current_count} found)"), "\n".join(self.summaries)
+                            # Calculate elapsed time
+                            elapsed_seconds = int(time.time() - self.program_start_time)
+                            hours = elapsed_seconds // 3600
+                            minutes = (elapsed_seconds % 3600) // 60
+                            seconds = elapsed_seconds % 60
+                            elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                            yield self.log_progress(f"⏳ Waiting for segments... ({current_count} found) | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
                     else:
                         # No segments yet
-                        yield self.log_progress(f"⏳ Waiting for first segment to start..."), "\n".join(self.summaries)
+                        # Calculate elapsed time
+                        elapsed_seconds = int(time.time() - self.program_start_time)
+                        hours = elapsed_seconds // 3600
+                        minutes = (elapsed_seconds % 3600) // 60
+                        seconds = elapsed_seconds % 60
+                        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                        yield self.log_progress(f"⏳ Waiting for first segment to start... | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
                 
                 # Check if background thread completed a summary
                 if self.new_summary_available:

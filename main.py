@@ -18,7 +18,7 @@ import google.genai as genai
 from google.genai import types
 
 # Configuration Constants
-VIDEO_DURATION_SECONDS = 600  # Duration of video clips to send to Gemini (in seconds)
+VIDEO_DURATION_SECONDS = 120  # Duration of video clips to send to Gemini (in seconds)
 SEGMENT_DURATION = 30  # Duration of each video segment (in seconds)
 NUM_SEGMENTS = VIDEO_DURATION_SECONDS // SEGMENT_DURATION  # Number of segments needed
 OVERLAP_SEGMENTS = 0  # Number of overlapping segments between cycles
@@ -37,6 +37,9 @@ FFMPEG_RETRY_DELAY = 120  # Seconds to wait between FFmpeg retries (2 minutes)
 GEMINI_MAX_RETRIES = 3  # Number of retries for Gemini API calls
 GEMINI_RETRY_DELAY = 30  # Seconds to wait between Gemini retries
 
+# Stream Monitoring Configuration
+STALL_TIMEOUT = 60  # Seconds to wait before checking if stream has stalled (network issue or stream end)
+
 # Gemini Configuration
 USE_GOOGLE_SEARCH = False  # Enable/disable Google Search grounding tool in Gemini
 INCLUDE_PREVIOUS_SUMMARIES = 3  # Number of previous summaries to include as context (0 = none, 1+ = include that many for continuity)
@@ -53,10 +56,11 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('google').setLevel(logging.WARNING)
 
 class LivestreamSummarizer:
-    def __init__(self, hls_url: str, api_key: str, stream_name: str = None, custom_prompt: str = None):
+    def __init__(self, hls_url: str, api_key: str, stream_name: str = None, custom_prompt: str = None, is_vod: bool = False):
         self.hls_url = hls_url
         self.api_key = api_key
         self.stream_name = stream_name or "stream"
+        self.is_vod = is_vod  # Flag to indicate if this is VOD (uses yt-dlp pipe)
         
         # Default prompt if none provided
         self.custom_prompt = custom_prompt or """liveposting, summary detail this stream for me in english
@@ -121,7 +125,10 @@ class LivestreamSummarizer:
 
         # FFmpeg processes
         self.recording_process = None
+        self.yt_dlp_process = None  # For VOD mode
         self.recording_start_time = None
+        self.program_start_time = time.time()  # Track program runtime for elapsed time display
+        self.ffmpeg_log_file = None
         
         # Overlap tracking
         self.last_end_index = -1  # Index of last segment used in previous cycle
@@ -131,6 +138,9 @@ class LivestreamSummarizer:
         
         # Storage for previous summaries (raw text only for context)
         self.summary_texts_only = []
+        
+        # Rate limiting for VOD (track last Gemini API call time)
+        self.last_gemini_call_time = 0
 
     def start_recording(self):
         """Start FFmpeg to record segments with compression applied during recording."""
@@ -155,39 +165,102 @@ class LivestreamSummarizer:
         
         logger.info("Segments directory cleaned")
 
-        # FFmpeg command to create compressed sequential segments during recording
-        # This eliminates the need for separate compression step later
-        cmd = [
-            'ffmpeg',
-            # HLS input options for stability and reconnection
-            '-reconnect', '1',              # Enable automatic reconnection
-            '-reconnect_streamed', '1',     # Reconnect to streamed (HLS) input
-            '-reconnect_delay_max', '10',   # Max delay between reconnects (10 seconds)
-            '-timeout', '30000000',         # 30 second timeout (in microseconds)
-            '-i', self.hls_url,
-            '-f', 'segment',
-            '-segment_time', str(SEGMENT_DURATION),
-            '-segment_wrap', '0',  # Never wrap segment numbers (allows unlimited segments)
-            '-reset_timestamps', '1',  # Reset timestamps for each segment
-            '-c:v', 'h264_nvenc',  # NVIDIA hardware-accelerated H.264 (faster than H.265)
-            '-preset', 'fast',  # Fast preset for maximum speed (ultrafast not available for NVENC)
-            '-rc', 'cbr',  # Constant bitrate for consistent speed
-            '-b:v', '500k',  # Lower bitrate for faster encoding (quality doesn't matter)
-            '-maxrate', '500k',  # Same as target for CBR
-            '-bufsize', '500k',  # Smaller buffer for speed
-            '-vf', 'scale=-2:720,fps=30',  # Keep scaling for smaller files
-            '-c:a', 'aac',
-            '-b:a', '64k',  # Lower audio bitrate for speed
-            '-movflags', '+faststart',  # Enable progressive download
-            str(self.segments_dir / 'segment_%03d.mp4')
-        ]
-        logger.info("Starting FFmpeg recording process with compression...")
-        logger.info(f"Recording compressed segments to {self.segments_dir} ({SEGMENT_DURATION}s each)")
+        # Open log file for FFmpeg/yt-dlp stderr
+        ffmpeg_log = Path(__file__).parent / "ffmpeg.log"
+        self.ffmpeg_log_file = open(ffmpeg_log, 'wb')
+        
+        if self.is_vod:
+            # VOD mode: Use yt-dlp to pipe to FFmpeg (avoids URL expiration)
+            logger.info("VOD mode: Using yt-dlp pipe to FFmpeg...")
+            
+            yt_dlp_cmd = [
+                'yt-dlp',
+                '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                '--no-playlist',
+                '-o', '-',  # Output to stdout
+                self.hls_url  # YouTube URL
+            ]
+            
+            ffmpeg_cmd = [
+                'ffmpeg',
+                '-i', 'pipe:0',  # Read from stdin (yt-dlp output)
+                '-f', 'segment',
+                '-segment_time', str(SEGMENT_DURATION),
+                '-segment_wrap', '0',
+                '-reset_timestamps', '1',
+                '-c:v', 'h264_nvenc',
+                '-preset', 'fast',
+                '-rc', 'cbr',
+                '-b:v', '500k',
+                '-maxrate', '500k',
+                '-bufsize', '500k',
+                '-vf', 'scale=-2:720,fps=30',
+                '-c:a', 'aac',
+                '-b:a', '64k',
+                '-movflags', '+faststart',
+                str(self.segments_dir / 'segment_%03d.mp4')
+            ]
+            
+            logger.info("Starting yt-dlp → FFmpeg pipe for VOD...")
+            logger.info(f"Recording compressed segments to {self.segments_dir} ({SEGMENT_DURATION}s each)")
+            
+            # Start yt-dlp process
+            self.yt_dlp_process = subprocess.Popen(
+                yt_dlp_cmd,
+                stdout=subprocess.PIPE,
+                stderr=self.ffmpeg_log_file
+            )
+            
+            # Start FFmpeg process with yt-dlp output as input
+            self.recording_process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdin=self.yt_dlp_process.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=self.ffmpeg_log_file
+            )
+            
+            # Allow yt-dlp_process to receive SIGPIPE if FFmpeg exits
+            if self.yt_dlp_process.stdout:
+                self.yt_dlp_process.stdout.close()
+            
+            logger.info("VOD recording started (yt-dlp → FFmpeg pipe)")
+            
+        else:
+            # Live stream mode: Direct FFmpeg recording from HLS URL (original behavior)
+            logger.info("Live stream mode: Direct FFmpeg recording...")
+            
+            cmd = [
+                'ffmpeg',
+                '-i', self.hls_url,
+                '-f', 'segment',
+                '-segment_time', str(SEGMENT_DURATION),
+                '-segment_wrap', '0',
+                '-reset_timestamps', '1',
+                '-c:v', 'h264_nvenc',
+                '-preset', 'fast',
+                '-rc', 'cbr',
+                '-b:v', '500k',
+                '-maxrate', '500k',
+                '-bufsize', '500k',
+                '-vf', 'scale=-2:720,fps=30',
+                '-c:a', 'aac',
+                '-b:a', '64k',
+                '-movflags', '+faststart',
+                str(self.segments_dir / 'segment_%03d.mp4')
+            ]
+            
+            logger.info("Starting FFmpeg recording process with compression...")
+            logger.info(f"Recording compressed segments to {self.segments_dir} ({SEGMENT_DURATION}s each)")
+            
+            self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=self.ffmpeg_log_file)
+            self.yt_dlp_process = None  # No yt-dlp for live streams
+            logger.info("Live stream recording started")
+        
         logger.info("Compression settings: 720p H.264 @ 500k CBR video + 64k audio (optimized for speed)")
-        self.recording_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.recording_start_time = time.time()
         time.sleep(5)  # Wait for segments to start
         logger.info("Recording started successfully")
+        logger.info(f"Output logged to: {ffmpeg_log}")
 
     def validate_segment(self, segment_path, log_on_success=True, log_on_failure=True):
         """Validate that a segment file is playable using ffprobe."""
@@ -219,6 +292,17 @@ class LivestreamSummarizer:
 
     def stop_recording(self):
         """Stop the recording process."""
+        # Stop yt-dlp process first (if VOD mode)
+        if self.yt_dlp_process:
+            logger.info("Stopping yt-dlp process...")
+            try:
+                self.yt_dlp_process.terminate()
+                self.yt_dlp_process.wait(timeout=5)
+            except:
+                self.yt_dlp_process.kill()
+            logger.info("yt-dlp stopped.")
+        
+        # Stop FFmpeg process
         if self.recording_process:
             logger.info("Stopping FFmpeg recording process...")
             self.recording_process.terminate()
@@ -227,6 +311,13 @@ class LivestreamSummarizer:
             logger.info("Recording stopped.")
         else:
             logger.info("No recording process to stop.")
+        
+        # Close log file
+        if self.ffmpeg_log_file:
+            try:
+                self.ffmpeg_log_file.close()
+            except:
+                pass
 
     def wait_for_segment_completion(self, segment_path: Path, timeout=None):
         """Wait until a specific segment stops growing and passes validation."""
@@ -722,6 +813,14 @@ class LivestreamSummarizer:
         # Check if already processing
         if self.processing:
             return
+        
+        # Rate limiting for VOD: Enforce 2-minute cooldown between Gemini API calls
+        if self.is_vod:
+            time_since_last_call = time.time() - self.last_gemini_call_time
+            if self.last_gemini_call_time > 0 and time_since_last_call < 120:
+                wait_time = 120 - time_since_last_call
+                logger.info(f"⏳ VOD rate limiting: Waiting {wait_time:.1f}s before next Gemini API call...")
+                return  # Skip this cycle, will retry in next iteration
             
         logger.info("=== Starting summarization cycle ===")
         self.processing = True
@@ -800,12 +899,33 @@ class LivestreamSummarizer:
             
             # Summarize the final video
             logger.info("Generating final summary...")
+            
+            # Apply rate limiting for VOD if needed
+            if self.is_vod and self.last_gemini_call_time > 0:
+                time_since_last_call = time.time() - self.last_gemini_call_time
+                if time_since_last_call < 120:
+                    wait_time = 120 - time_since_last_call
+                    logger.info(f"⏳ VOD rate limiting: Waiting {wait_time:.1f}s before final Gemini API call...")
+                    time.sleep(wait_time)
+            
             summary = self.summarize_with_gemini()
+            
+            # Record API call time for VOD
+            if self.is_vod:
+                self.last_gemini_call_time = time.time()
             
             if summary:
                 timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-                logger.info(f"Final summary received at {timestamp}")
-                print(f"\n--- FINAL Summary at {timestamp} ---\n{summary}\n")
+                
+                # Calculate elapsed time
+                elapsed_seconds = int(time.time() - self.program_start_time)
+                hours = elapsed_seconds // 3600
+                minutes = (elapsed_seconds % 3600) // 60
+                seconds = elapsed_seconds % 60
+                elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                
+                logger.info(f"Final summary received at {timestamp} (Total elapsed: {elapsed_str})")
+                print(f"\n--- FINAL Summary at {timestamp} (⏱️ Total: {elapsed_str}) ---\n{summary}\n")
                 summary_num = self.append_summary(summary, timestamp)
                 print(f"✅ Final summary #{summary_num} saved to summary-{self.stream_name}.txt")
             else:
@@ -843,10 +963,22 @@ class LivestreamSummarizer:
                 
                 summary = self.summarize_with_gemini()
                 
+                # Record Gemini API call time for VOD rate limiting
+                if self.is_vod:
+                    self.last_gemini_call_time = time.time()
+                
                 if summary:
                     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-                    logger.info(f"Summary received at {timestamp}")
-                    print(f"\n--- Summary at {timestamp} ---\n{summary}\n")
+                    
+                    # Calculate elapsed time
+                    elapsed_seconds = int(time.time() - self.program_start_time)
+                    hours = elapsed_seconds // 3600
+                    minutes = (elapsed_seconds % 3600) // 60
+                    seconds = elapsed_seconds % 60
+                    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                    
+                    logger.info(f"Summary received at {timestamp} (Elapsed: {elapsed_str})")
+                    print(f"\n--- Summary at {timestamp} (⏱️ {elapsed_str}) ---\n{summary}\n")
                     # Append to single summary file with stream name
                     summary_num = self.append_summary(summary, timestamp)
                     print(f"✅ Summary #{summary_num} saved to summary-{self.stream_name}.txt")
@@ -896,12 +1028,23 @@ class LivestreamSummarizer:
                     exit_code = self.recording_process.returncode
                     runtime = time.time() - self.recording_start_time if self.recording_start_time else 0
                     
-                    # Get stderr output to check for errors
-                    try:
-                        _, stderr_output = self.recording_process.communicate(timeout=5)
-                        stderr_text = stderr_output.decode('utf-8', errors='ignore') if stderr_output else ""
-                    except:
-                        stderr_text = ""
+                    # Close log file and read its contents
+                    if self.ffmpeg_log_file:
+                        try:
+                            self.ffmpeg_log_file.close()
+                            self.ffmpeg_log_file = None
+                        except:
+                            pass
+                    
+                    # Read FFmpeg log to check for errors
+                    stderr_text = ""
+                    ffmpeg_log = Path(__file__).parent / "ffmpeg.log"
+                    if ffmpeg_log.exists():
+                        try:
+                            with open(ffmpeg_log, 'r', encoding='utf-8', errors='ignore') as f:
+                                stderr_text = f.read()
+                        except:
+                            pass
                     
                     # Determine if this was a clean exit or an error
                     is_error = False
@@ -912,16 +1055,18 @@ class LivestreamSummarizer:
                         "Invalid data found",
                         "Immediate exit requested",
                         "Conversion failed",
-                        "Error",
-                        "moov atom not found"
+                        "moov atom not found",
+                        "Protocol not found",
+                        "No such file or directory"
                     ]
                     
-                    # Check if FFmpeg exited too quickly (likely an error)
-                    if runtime < 30:
+                    # Check if FFmpeg exited too quickly AND no segments were created (likely an error)
+                    segments_created = len(list(self.segments_dir.glob('segment_*.mp4')))
+                    if runtime < 30 and segments_created == 0:
                         is_error = True
-                        logger.warning(f"FFmpeg exited after only {runtime:.1f} seconds - likely an error")
+                        logger.warning(f"FFmpeg exited after only {runtime:.1f} seconds with no segments - likely an error")
                     
-                    # Check stderr for error messages
+                    # Check stderr for error messages (but ignore common warnings)
                     if stderr_text:
                         for indicator in error_indicators:
                             if indicator.lower() in stderr_text.lower():
@@ -932,10 +1077,11 @@ class LivestreamSummarizer:
                     if is_error:
                         logger.error(f"FFmpeg process exited with code {exit_code} due to an error")
                         if stderr_text:
-                            # Show last 500 characters of stderr
-                            logger.error(f"FFmpeg stderr (last 500 chars):\n{stderr_text[-500:]}")
-                            print(f"\n❌ FFmpeg Error:\n{stderr_text[-500:]}\n")
+                            # Show last 1000 characters of stderr
+                            logger.error(f"FFmpeg log (last 1000 chars):\n{stderr_text[-1000:]}")
+                            print(f"\n❌ FFmpeg Error:\n{stderr_text[-1000:]}\n")
                         logger.error("Recording failed. Please check the stream URL and try again.")
+                        logger.info(f"Full FFmpeg log available at: {ffmpeg_log}")
                         break
                     else:
                         logger.info(f"FFmpeg process exited cleanly with code {exit_code} after {runtime:.1f} seconds")
@@ -960,17 +1106,26 @@ class LivestreamSummarizer:
                     try:
                         current_max_index = max(int(seg.stem.split('_')[1]) for seg in segments if seg.stem.split('_')[1].isdigit())
                         
-                        # Detect stalled recording (no new segments for 60 seconds)
+                        # Detect stalled recording (no new segments for STALL_TIMEOUT seconds)
                         if current_max_index == last_max_index:
                             if no_growth_start is None:
                                 no_growth_start = time.time()
-                            elif time.time() - no_growth_start > 60:
+                            elif time.time() - no_growth_start > STALL_TIMEOUT:
                                 print()  # New line after the recording status
-                                logger.warning("No new segments detected for 60 seconds, stream may have ended")
-                                logger.info("Processing remaining segments...")
-                                self.process_remaining_segments()
-                                logger.info("All processing completed. Exiting.")
-                                break
+                                # Check if FFmpeg is still running
+                                if self.recording_process and self.recording_process.poll() is None:
+                                    # FFmpeg is still running but segments stopped - network stall
+                                    logger.warning(f"No new segments for {STALL_TIMEOUT}s but FFmpeg still running - likely network stall")
+                                    logger.warning("Please manually restart if stream is actually still live")
+                                    logger.info("Continuing to monitor... (segments will resume if connection recovers)")
+                                    no_growth_start = time.time()  # Reset timer to give more time
+                                else:
+                                    # FFmpeg has exited - stream truly ended
+                                    logger.warning(f"No new segments detected for {STALL_TIMEOUT} seconds and FFmpeg has exited")
+                                    logger.info("Processing remaining segments...")
+                                    self.process_remaining_segments()
+                                    logger.info("All processing completed. Exiting.")
+                                    break
                         else:
                             no_growth_start = None
                             last_max_index = current_max_index
@@ -995,6 +1150,13 @@ class LivestreamSummarizer:
                 # Update current recording file size every 5 seconds
                 current_time = time.time()
                 if current_time - last_size_update >= 5:
+                    # Calculate elapsed time
+                    elapsed_seconds = int(current_time - self.program_start_time)
+                    hours = elapsed_seconds // 3600
+                    minutes = (elapsed_seconds % 3600) // 60
+                    seconds = elapsed_seconds % 60
+                    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                    
                     if segments:
                         # Get the current segment being recorded (highest index)
                         try:
@@ -1002,11 +1164,15 @@ class LivestreamSummarizer:
                             new_size = current_segment.stat().st_size
                             if new_size != current_recording_size:
                                 current_recording_size = new_size
-                                # Update the same line with current file size
+                                # Update the same line with current file size and elapsed time
                                 size_mb = current_recording_size / (1024 * 1024)
-                                print(f"\r📹 Recording: {current_segment.name} ({size_mb:.1f} MB)", end='', flush=True)
+                                print(f"\r📹 Recording: {current_segment.name} ({size_mb:.1f} MB) | ⏱️ {elapsed_str}", end='', flush=True)
                         except (ValueError, OSError):
                             pass
+                    else:
+                        # Show elapsed time even if no segments yet
+                        print(f"\r⏱️ Elapsed: {elapsed_str}", end='', flush=True)
+                    
                     last_size_update = current_time
                 
                 time.sleep(1)
@@ -1028,9 +1194,31 @@ def main():
     custom_prompt = sys.argv[2] if len(sys.argv) == 3 else None
     stream_name = None  # Will be auto-extracted from YouTube title
     
-    # Check if it's a YouTube URL and extract HLS URL using yt-dlp
-    if 'youtube.com' in url or 'youtu.be' in url:
-        print("Detected YouTube URL, extracting HLS stream URL...")
+    # Check if it's a YouTube URL
+    is_youtube = 'youtube.com' in url or 'youtu.be' in url
+    is_vod = False
+    
+    if is_youtube:
+        print("Detected YouTube URL, checking if live or VOD...")
+        
+        # Check if it's a livestream or VOD
+        try:
+            check_result = subprocess.run(
+                ['yt-dlp', '--print', '%(is_live)s', url],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if check_result.returncode == 0:
+                is_live_str = check_result.stdout.strip().lower()
+                is_vod = is_live_str in ['false', 'none', '']
+                if is_vod:
+                    print("✓ Detected VOD (Video On Demand)")
+                else:
+                    print("✓ Detected Live Stream")
+        except Exception as e:
+            print(f"⚠️ Could not determine if live/VOD, assuming live: {e}")
+            is_vod = False
         
         # Extract stream name from YouTube URL if not provided
         if not stream_name:
@@ -1054,48 +1242,55 @@ def main():
                 print(f"Could not get stream name: {e}")
                 stream_name = "stream"
         
-        try:
-            # Try without format selector first
-            result = subprocess.run(
-                ['yt-dlp', '-g', url],
-                capture_output=True, 
-                text=True,
-                timeout=30
-            )
-            
-            # If failed, try with explicit format
-            if result.returncode != 0:
-                print("⚠️ Retrying with explicit format...")
+        # For VOD, use YouTube URL directly (yt-dlp will handle it)
+        if is_vod:
+            hls_url = url  # Pass YouTube URL, start_recording will use yt-dlp pipe
+            print("Using yt-dlp pipe method for VOD (no URL expiration issues)")
+        else:
+            # For live streams, extract HLS URL (original behavior)
+            print("Extracting HLS stream URL for live stream...")
+            try:
+                # Try without format selector first
                 result = subprocess.run(
-                    ['yt-dlp', '-f', 'b', '-g', url],
+                    ['yt-dlp', '-g', url],
                     capture_output=True, 
                     text=True,
                     timeout=30
                 )
-            
-            if result.returncode == 0 and result.stdout.strip():
-                hls_url = result.stdout.strip()
-                print(f"Got HLS URL: {hls_url}")
-            else:
-                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                print(f"❌ Failed to extract HLS URL from YouTube")
-                if "Sign in to confirm" in error_msg or "not a bot" in error_msg:
-                    print("⚠️ YouTube detected bot - requires authentication")
-                    print("💡 Try: pip install -U yt-dlp (update to latest)")
+                
+                # If failed, try with explicit format
+                if result.returncode != 0:
+                    print("⚠️ Retrying with explicit format...")
+                    result = subprocess.run(
+                        ['yt-dlp', '-f', 'b', '-g', url],
+                        capture_output=True, 
+                        text=True,
+                        timeout=30
+                    )
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    hls_url = result.stdout.strip()
+                    print(f"Got HLS URL: {hls_url}")
                 else:
-                    print(f"Error: {error_msg}")
-                    print("Make sure yt-dlp is installed and the YouTube URL is valid.")
+                    error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                    print(f"❌ Failed to extract HLS URL from YouTube")
+                    if "Sign in to confirm" in error_msg or "not a bot" in error_msg:
+                        print("⚠️ YouTube detected bot - requires authentication")
+                        print("💡 Try: pip install -U yt-dlp (update to latest)")
+                    else:
+                        print(f"Error: {error_msg}")
+                        print("Make sure yt-dlp is installed and the YouTube URL is valid.")
+                    sys.exit(1)
+            except FileNotFoundError:
+                print("❌ yt-dlp not found. Install yt-dlp with: pip install yt-dlp")
+                print("Or provide the HLS URL directly.")
                 sys.exit(1)
-        except FileNotFoundError:
-            print("❌ yt-dlp not found. Install yt-dlp with: pip install yt-dlp")
-            print("Or provide the HLS URL directly.")
-            sys.exit(1)
-        except subprocess.TimeoutExpired:
-            print("❌ yt-dlp timed out. Check your internet connection.")
-            sys.exit(1)
-        except Exception as e:
-            print(f"❌ Error running yt-dlp: {e}")
-            sys.exit(1)
+            except subprocess.TimeoutExpired:
+                print("❌ yt-dlp timed out. Check your internet connection.")
+                sys.exit(1)
+            except Exception as e:
+                print(f"❌ Error running yt-dlp: {e}")
+                sys.exit(1)
     else:
         # Assume it's already an HLS URL
         hls_url = url
@@ -1115,7 +1310,7 @@ def main():
         print("Using default prompt")
     
     print(f"Summary file: summary-{stream_name}.txt")
-    summarizer = LivestreamSummarizer(hls_url, api_key, stream_name, custom_prompt)
+    summarizer = LivestreamSummarizer(hls_url, api_key, stream_name, custom_prompt, is_vod=is_vod)
     summarizer.run()
 
 if __name__ == "__main__":
