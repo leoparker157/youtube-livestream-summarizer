@@ -223,10 +223,17 @@ class LivestreamSummarizerGradio:
                 )
         
         # Use yt-dlp in passthrough mode to pipe stream directly to ffmpeg
-        # yt-dlp downloads HLS segments and pipes the raw MPEG-TS stream to FFmpeg
+        # Different format selectors for live vs VOD
+        if self.is_vod:
+            # VOD: Use specific MP4 format (avoids bot detection)
+            format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+        else:
+            # Live: Use 'best' format (HLS-compatible for live streams)
+            format_selector = 'best'
+        
         yt_dlp_cmd = [
             'yt-dlp',
-            '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',  # Same format as main.py
+            '-f', format_selector,
             '--no-playlist',             # Don't download playlists
             '-o', '-',                   # Output to stdout (pipe)
             self.youtube_url
