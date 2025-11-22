@@ -228,13 +228,14 @@ class LivestreamSummarizerGradio:
             # VOD: Use specific MP4 format (avoids bot detection)
             format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
         else:
-            # Live: Use 'best' format (HLS-compatible for live streams)
-            format_selector = 'best'
+            # Live: Use 'b' format (best pre-merged, suppresses warning)
+            format_selector = 'b'
         
         yt_dlp_cmd = [
             'yt-dlp',
             '-f', format_selector,
             '--no-playlist',             # Don't download playlists
+            '--extractor-args', 'youtube:player_client=android,web',  # Bypass bot detection and JS runtime requirement
             '-o', '-',                   # Output to stdout (pipe)
             self.youtube_url
         ]
