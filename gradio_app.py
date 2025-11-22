@@ -257,16 +257,17 @@ class LivestreamSummarizerGradio:
         self.log_progress(f"⚙️ Using yt-dlp pipe for continuous HLS refresh")
         
         # Start yt-dlp process (pipes stream to FFmpeg)
-        yt_dlp_process = subprocess.Popen(
+        self.yt_dlp_process = subprocess.Popen(
             yt_dlp_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,  # Capture stderr for debugging
+            stdout=subprocess.PIPE,  # Binary pipe to FFmpeg
+            stderr=subprocess.PIPE,  # Text stderr for debugging
+            text=False,  # stdout is binary (video data), stderr will be read as text when needed
         )
         
         # Start FFmpeg process (reads from yt-dlp's stdout)
         self.recording_process = subprocess.Popen(
             ffmpeg_cmd,
-            stdin=yt_dlp_process.stdout,
+            stdin=self.yt_dlp_process.stdout,
             stdout=subprocess.PIPE,  # Capture stdout for debugging
             stderr=subprocess.PIPE,
             text=True
@@ -276,8 +277,9 @@ class LivestreamSummarizerGradio:
         self.ffmpeg_cmd = ffmpeg_cmd
         self.yt_dlp_cmd = yt_dlp_cmd
         
-        # Allow yt-dlp to receive SIGPIPE if FFmpeg exits
-        yt_dlp_process.stdout.close()
+        # Important: Do NOT close yt_dlp_process.stdout here!
+        # FFmpeg needs to read from it continuously. Closing it will cause "Invalid data" error.
+        # The pipe will be automatically closed when both processes terminate.
         
         time.sleep(5)
     
@@ -780,9 +782,13 @@ class LivestreamSummarizerGradio:
                         # yt-dlp diagnostics
                         if self.yt_dlp_process and self.yt_dlp_process.stderr:
                             try:
-                                ytdlp_stderr_content = self.yt_dlp_process.stderr.read()
-                            except:
-                                ytdlp_stderr_content = "(Could not read yt-dlp stderr)"
+                                ytdlp_stderr_bytes = self.yt_dlp_process.stderr.read()
+                                if isinstance(ytdlp_stderr_bytes, bytes):
+                                    ytdlp_stderr_content = ytdlp_stderr_bytes.decode('utf-8', errors='ignore')
+                                else:
+                                    ytdlp_stderr_content = ytdlp_stderr_bytes
+                            except Exception as e:
+                                ytdlp_stderr_content = f"(Could not read yt-dlp stderr: {e})"
 
                         # Show FFmpeg command that was run
                         if hasattr(self, 'ffmpeg_cmd') and self.ffmpeg_cmd:
