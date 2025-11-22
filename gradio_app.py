@@ -917,6 +917,9 @@ class LivestreamSummarizerGradio:
                     
                     yield self.log_progress(f"📊 Cycle segments: indices {start_index} to {end_index} ({num_segments} segments)"), "\n".join(self.summaries)
                     
+                    # Flag to track if FFmpeg restarted during waiting (skip concatenation if true)
+                    restart_occurred = False
+                    
                     # Wait for NEXT segment to start (proves all cycle segments are complete)
                     next_segment_index = end_index + 1
                     next_segment_path = segments_dir / f"segment_{next_segment_index:03d}.mp4"
@@ -973,7 +976,10 @@ class LivestreamSummarizerGradio:
                                             
                                             if self.restart_ffmpeg(segment_duration, segments_dir):
                                                 yield self.log_progress("✅ FFmpeg restarted successfully"), "\n".join(self.summaries)
-                                                # Break out and wait for new segments
+                                                yield self.log_progress("⚠️ Aborting current cycle - will redetect segments"), "\n".join(self.summaries)
+                                                # Mark that restart occurred - skip concatenation
+                                                restart_occurred = True
+                                                # Break out of waiting loop
                                                 break
                                             else:
                                                 yield self.log_progress("❌ FFmpeg restart failed - stopping"), "\n".join(self.summaries)
@@ -992,6 +998,12 @@ class LivestreamSummarizerGradio:
                         seconds = elapsed_seconds % 60
                         elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
                         yield self.log_progress(f"⏳ {next_segment_path.name} not started yet, proceeding with current segments... | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
+                    
+                    # Skip concatenation if FFmpeg restarted during waiting
+                    if restart_occurred:
+                        yield self.log_progress("⏭️ Skipping concatenation - restarted segments will be processed in next cycle"), "\n".join(self.summaries)
+                        self.processing = False
+                        continue  # Go back to segment detection
                     
                     # Get segment files for concatenation
                     segment_files = [segments_dir / f"segment_{i:03d}.mp4" for i in range(start_index, end_index + 1)]
