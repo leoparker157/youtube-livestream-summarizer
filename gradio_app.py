@@ -235,6 +235,9 @@ class LivestreamSummarizerGradio:
             'yt-dlp',
             '-f', format_selector,
             '--no-playlist',
+            '--concurrent-fragments', '5',    # Download 5 fragments in parallel for faster download
+            '--buffer-size', '16M',           # 16MB buffer to prevent stalls
+            '--http-chunk-size', '10M',       # 10MB chunks for efficient streaming
             '-o', '-',
             self.youtube_url
         ]
@@ -243,7 +246,9 @@ class LivestreamSummarizerGradio:
         ffmpeg_cmd = [
             'ffmpeg',
             '-fflags', '+genpts+discardcorrupt',  # Generate PTS and discard corrupt packets
-            '-thread_queue_size', '512',          # Larger buffer for pipe input
+            '-thread_queue_size', '1024',          # Increased buffer for faster multi-threaded input
+            '-analyzeduration', '10M',             # Analyze more data for better stream detection
+            '-probesize', '10M',                   # Larger probe size for stability
             '-v', 'verbose',                       # Verbose logging for debugging
             '-i', 'pipe:0',                       # Read from stdin (yt-dlp's output)
             '-f', 'segment',
