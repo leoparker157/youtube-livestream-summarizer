@@ -223,20 +223,19 @@ class LivestreamSummarizerGradio:
                 )
         
         # Use yt-dlp in passthrough mode to pipe stream directly to ffmpeg
-        # Different format selectors for live vs VOD
+        # Match main.py's exact format for maximum compatibility
         if self.is_vod:
-            # VOD: Use specific MP4 format (avoids bot detection)
+            # VOD: Use exact same format as main.py
             format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
         else:
-            # Live: Use 'b' format (best pre-merged, suppresses warning)
-            format_selector = 'b'
+            # Live: Use same format as main.py VOD (works for both)
+            format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
         
         yt_dlp_cmd = [
             'yt-dlp',
             '-f', format_selector,
-            '--no-playlist',             # Don't download playlists
-            '--extractor-args', 'youtube:player_client=android,web',  # Bypass bot detection and JS runtime requirement
-            '-o', '-',                   # Output to stdout (pipe)
+            '--no-playlist',
+            '-o', '-',
             self.youtube_url
         ]
         
@@ -643,7 +642,7 @@ class LivestreamSummarizerGradio:
             yield self.log_progress("🔍 Detecting if live or VOD..."), ""
             try:
                 check_result = subprocess.run(
-                    ['yt-dlp', '--print', '%(is_live)s', youtube_url],
+                    ['yt-dlp', '--print', '%(is_live)s', '--extractor-args', 'youtube:player_client=android', youtube_url],
                     capture_output=True,
                     text=True,
                     timeout=30
