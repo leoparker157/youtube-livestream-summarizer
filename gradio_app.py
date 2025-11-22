@@ -226,13 +226,9 @@ class LivestreamSummarizerGradio:
         # yt-dlp downloads HLS segments and pipes the raw MPEG-TS stream to FFmpeg
         yt_dlp_cmd = [
             'yt-dlp',
-            '--format', 'best',
-            '--no-part',
-            '--hls-use-mpegts',          # Force MPEG-TS container (works with pipes)
-            '--concurrent-fragments', '3', # Download 3 fragments in parallel
-            '--output', '-',             # Output to stdout (pipe)
-            '--quiet',
-            '--no-warnings',
+            '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',  # Same format as main.py
+            '--no-playlist',             # Don't download playlists
+            '-o', '-',                   # Output to stdout (pipe)
             self.youtube_url
         ]
         
