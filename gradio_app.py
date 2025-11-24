@@ -69,6 +69,7 @@ class LivestreamSummarizerGradio:
         self.recording_process = None
         self.yt_dlp_process = None  # yt-dlp process for piping stream
         self.is_vod = False  # Track if current recording is VOD
+        self.is_vod_mode = False  # Track if VOD download has completed (FFmpeg exited)
         self.last_gemini_call_time = 0  # For VOD rate limiting
         self.program_start_time = 0  # Track program runtime for elapsed time display
         self.ffmpeg_cmd = []  # Store FFmpeg command for debugging
@@ -225,19 +226,24 @@ class LivestreamSummarizerGradio:
         # Use yt-dlp in passthrough mode to pipe stream directly to ffmpeg
         # Match main.py's exact format for maximum compatibility
         if self.is_vod:
-            # VOD: Use exact same format as main.py
-            format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            # VOD: Ensure video+audio are merged before piping
+            format_selector = 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best'
+            self.is_vod_mode = True  # Mark as VOD for special handling
         else:
-            # Live: Use same format as main.py VOD (works for both)
-            format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            # Live: Use same format for consistency
+            format_selector = 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best'
         
         yt_dlp_cmd = [
             'yt-dlp',
             '-f', format_selector,
             '--no-playlist',
-            '--concurrent-fragments', '5',    # Download 5 fragments in parallel for faster download
-            '--buffer-size', '16M',           # 16MB buffer to prevent stalls
-            '--http-chunk-size', '10M',       # 10MB chunks for efficient streaming
+            '--no-part',                       # No .part files
+            '--newline',                       # Clean output
+            '--no-warnings',
+            '--concurrent-fragments', '5',     # Download 5 fragments in parallel for faster download
+            '--buffer-size', '16M',            # 16MB buffer to prevent stalls
+            '--http-chunk-size', '10M',        # 10MB chunks for efficient streaming
+            '--extractor-args', 'youtube:player_client=android',  # Bypass bot detection
             '-o', '-',
             self.youtube_url
         ]
@@ -245,12 +251,13 @@ class LivestreamSummarizerGradio:
         # FFmpeg reads from yt-dlp's stdout (pipe)
         ffmpeg_cmd = [
             'ffmpeg',
-            '-fflags', '+genpts+discardcorrupt',  # Generate PTS and discard corrupt packets
-            '-thread_queue_size', '1024',          # Increased buffer for faster multi-threaded input
-            '-analyzeduration', '10M',             # Analyze more data for better stream detection
-            '-probesize', '10M',                   # Larger probe size for stability
-            '-v', 'verbose',                       # Verbose logging for debugging
-            '-i', 'pipe:0',                       # Read from stdin (yt-dlp's output)
+            '-fflags', '+genpts+igndts+discardcorrupt',  # Generate PTS, ignore DTS issues, discard corrupt
+            '-avoid_negative_ts', 'make_zero',            # Fix timestamp issues
+            '-thread_queue_size', '2048',                 # Large buffer for smooth pipe read
+            '-analyzeduration', '20M',                    # Deep format analysis
+            '-probesize', '20M',                          # Larger probe size for stability
+            '-v', 'verbose',                              # Verbose logging for debugging
+            '-i', 'pipe:0',                               # Read from stdin (yt-dlp's output)
             '-f', 'segment',
             '-segment_time', str(segment_duration),
             '-segment_start_number', str(start_number),
@@ -270,6 +277,7 @@ class LivestreamSummarizerGradio:
             stdout=subprocess.PIPE,  # Binary pipe to FFmpeg
             stderr=subprocess.PIPE,  # Text stderr for debugging
             text=False,  # stdout is binary (video data), stderr will be read as text when needed
+            bufsize=16*1024*1024     # 16MB buffer
         )
         
         # Start FFmpeg process (reads from yt-dlp's stdout)
@@ -278,7 +286,8 @@ class LivestreamSummarizerGradio:
             stdin=self.yt_dlp_process.stdout,
             stdout=subprocess.PIPE,  # Capture stdout for debugging
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            bufsize=16*1024*1024     # 16MB buffer
         )
         
         # Store commands for error reporting
@@ -503,21 +512,50 @@ class LivestreamSummarizerGradio:
                 self.log_progress(f"🤖 Generating summary with {model_name}...")
                 config = types.GenerateContentConfig()
             
-            response = client.models.generate_content(
-                model=model_name,
-                contents=[
-                    types.Part.from_text(text=final_prompt),
-                    types.Part.from_uri(file_uri=video_file.uri, mime_type=video_file.mime_type)
-                ],
-                config=config
-            )
+            # Retry logic for transient Gemini API errors (500, rate limits, etc.)
+            max_retries = 3
+            retry_delay = 30  # seconds
             
-            if response.text:
-                self.log_progress("✅ Summary generated successfully")
-                return response.text
-            else:
-                self.log_progress("❌ Summary was empty")
-                return None
+            for attempt in range(max_retries):
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[
+                            types.Part.from_text(text=final_prompt),
+                            types.Part.from_uri(file_uri=video_file.uri, mime_type=video_file.mime_type)
+                        ],
+                        config=config
+                    )
+                    
+                    if response.text:
+                        self.log_progress("✅ Summary generated successfully")
+                        return response.text
+                    else:
+                        self.log_progress("❌ Summary was empty")
+                        return None
+                        
+                except Exception as api_error:
+                    error_str = str(api_error).lower()
+                    
+                    # Check if it's a transient error (500, rate limit, etc.)
+                    is_transient_error = any([
+                        '500' in error_str,
+                        'internal' in error_str,
+                        'rate limit' in error_str,
+                        'quota' in error_str,
+                        '429' in error_str,
+                        'resource exhausted' in error_str
+                    ])
+                    
+                    if is_transient_error and attempt < max_retries - 1:
+                        # Use retry_delay for rate limits and transient errors
+                        self.log_progress(f"⚠️ Gemini API transient error (attempt {attempt + 1}/{max_retries}): {api_error}")
+                        self.log_progress(f"⏳ Retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        # Not a transient error or final attempt, re-raise
+                        raise
         except Exception as e:
             error_msg = str(e)
             self.log_progress(f"❌ Gemini error: {error_msg}")
@@ -714,6 +752,13 @@ class LivestreamSummarizerGradio:
                 ffmpeg_dead = self.recording_process and self.recording_process.poll() is not None
                 ytdlp_dead = self.yt_dlp_process and self.yt_dlp_process.poll() is not None
                 
+                # VOD mode: FFmpeg exiting is normal (download complete)
+                if ffmpeg_dead and self.is_vod_mode:
+                    if not hasattr(self, 'vod_complete_logged') or not self.vod_complete_logged:
+                        self.vod_complete_logged = True
+                        yield self.log_progress("✅ VOD download complete. Continuing to process segments in cycles..."), "\n".join(self.summaries)
+                    ffmpeg_dead = False  # Don't treat as error for VOD
+                
                 if ffmpeg_dead or ytdlp_dead:
                     # Process died - capture diagnostics
                     if ffmpeg_dead:
@@ -880,20 +925,6 @@ class LivestreamSummarizerGradio:
                         
                         can_process = max_index >= required_max_index and not self.processing
                         
-                        # VOD rate limiting: Check 2-minute cooldown
-                        if can_process and self.is_vod:
-                            time_since_last_call = time.time() - self.last_gemini_call_time
-                            if self.last_gemini_call_time > 0 and time_since_last_call < 120:
-                                wait_time = 120 - time_since_last_call
-                                # Calculate elapsed time
-                                elapsed_seconds = int(time.time() - self.program_start_time)
-                                hours = elapsed_seconds // 3600
-                                minutes = (elapsed_seconds % 3600) // 60
-                                seconds = elapsed_seconds % 60
-                                elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                                yield self.log_progress(f"⏳ VOD rate limiting: {wait_time:.0f}s until next Gemini call... | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
-                                can_process = False  # Skip this cycle
-                        
                     except (ValueError, StopIteration):
                         # If parsing fails, we still have segments, just can't get max index
                         current_count = len(segments)
@@ -925,23 +956,32 @@ class LivestreamSummarizerGradio:
                     # Flag to track if FFmpeg restarted during waiting (skip concatenation if true)
                     restart_occurred = False
                     
-                    # Wait for NEXT segment to start (proves all cycle segments are complete)
-                    next_segment_index = end_index + 1
-                    next_segment_path = segments_dir / f"segment_{next_segment_index:03d}.mp4"
-                    # Calculate elapsed time
-                    elapsed_seconds = int(time.time() - self.program_start_time)
-                    hours = elapsed_seconds // 3600
-                    minutes = (elapsed_seconds % 3600) // 60
-                    seconds = elapsed_seconds % 60
-                    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                    yield self.log_progress(f"⏳ Waiting for next segment {next_segment_path.name} to start... | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
+                    # Check if recording is still active (FFmpeg running)
+                    recording_active = self.recording_process and self.recording_process.poll() is None
+                    
+                    if recording_active:
+                        # Wait for NEXT segment to start (proves all cycle segments are complete)
+                        next_segment_index = end_index + 1
+                        next_segment_path = segments_dir / f"segment_{next_segment_index:03d}.mp4"
+                        # Calculate elapsed time
+                        elapsed_seconds = int(time.time() - self.program_start_time)
+                        hours = elapsed_seconds // 3600
+                        minutes = (elapsed_seconds % 3600) // 60
+                        seconds = elapsed_seconds % 60
+                        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                        yield self.log_progress(f"⏳ Waiting for next segment {next_segment_path.name} to start... | ⏱️ {elapsed_str}"), "\n".join(self.summaries)
+                    else:
+                        # Recording finished (FFmpeg exited), all segments already complete
+                        yield self.log_progress(f"✅ Recording complete, validating cycle segments {start_index} to {end_index}..."), "\n".join(self.summaries)
+                        # Skip waiting for next segment - proceed directly to concatenation
+                        recording_active = False
                     
                     wait_start = time.time()
                     wait_timeout = segment_duration * 2  # 2x segment duration
                     last_cycle_size = 0
                     finalizing_stall_start = None  # Track stall during finalization
                     
-                    while time.time() - wait_start < wait_timeout:
+                    while recording_active and time.time() - wait_start < wait_timeout:
                         if next_segment_path.exists() and next_segment_path.stat().st_size > 0:
                             yield self.log_progress(f"✅ Next segment {next_segment_path.name} started, cycle segments complete"), "\n".join(self.summaries)
                             break

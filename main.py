@@ -18,7 +18,7 @@ import google.genai as genai
 from google.genai import types
 
 # Configuration Constants
-VIDEO_DURATION_SECONDS = 120  # Duration of video clips to send to Gemini (in seconds)
+VIDEO_DURATION_SECONDS = 180  # Duration of video clips to send to Gemini (in seconds)
 SEGMENT_DURATION = 30  # Duration of each video segment (in seconds)
 NUM_SEGMENTS = VIDEO_DURATION_SECONDS // SEGMENT_DURATION  # Number of segments needed
 OVERLAP_SEGMENTS = 0  # Number of overlapping segments between cycles
@@ -39,6 +39,7 @@ GEMINI_RETRY_DELAY = 30  # Seconds to wait between Gemini retries
 
 # Stream Monitoring Configuration
 STALL_TIMEOUT = 60  # Seconds to wait before checking if stream has stalled (network issue or stream end)
+MAX_STALL_WARNINGS = 3  # Number of consecutive stall warnings before considering stream ended (total: STALL_TIMEOUT * MAX_STALL_WARNINGS)
 
 # Gemini Configuration
 USE_GOOGLE_SEARCH = False  # Enable/disable Google Search grounding tool in Gemini
@@ -128,6 +129,7 @@ class LivestreamSummarizer:
         self.yt_dlp_process = None  # For VOD mode
         self.recording_start_time = None
         self.program_start_time = time.time()  # Track program runtime for elapsed time display
+        self.is_vod_mode = False  # Track if recording VOD (download completes quickly)
         self.ffmpeg_log_file = None
         
         # Overlap tracking
@@ -170,60 +172,94 @@ class LivestreamSummarizer:
         self.ffmpeg_log_file = open(ffmpeg_log, 'wb')
         
         if self.is_vod:
-            # VOD mode: Use yt-dlp to pipe to FFmpeg (avoids URL expiration)
-            logger.info("VOD mode: Using yt-dlp pipe to FFmpeg...")
+            # VOD mode: yt-dlp streams raw data, FFmpeg handles ALL encoding/segmenting
+            self.is_vod_mode = True  # Mark as VOD for special handling
+            logger.info("VOD mode: yt-dlp raw stream → FFmpeg complete processing...")
             
+            # yt-dlp: Download and stream raw container to stdout (NO transcoding)
             yt_dlp_cmd = [
                 'yt-dlp',
-                '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                # Format: Best video+audio merged, prioritize MP4 container
+                '-f', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best',
                 '--no-playlist',
-                '-o', '-',  # Output to stdout
-                self.hls_url  # YouTube URL
+                '--no-part',                          # No .part files
+                '--newline',                          # Clean output
+                '--no-warnings',
+                # Performance: Multi-threaded download
+                '--concurrent-fragments', '5',
+                '--buffer-size', '16M',
+                '--http-chunk-size', '10M',
+                # Bypass bot detection
+                '--extractor-args', 'youtube:player_client=android',
+                # Output complete container to stdout (yt-dlp merges if needed)
+                '-o', '-',
+                self.hls_url
             ]
             
+            # FFmpeg: Receive complete stream, do ALL encoding/muxing/segmenting
             ffmpeg_cmd = [
                 'ffmpeg',
-                '-i', 'pipe:0',  # Read from stdin (yt-dlp output)
+                # Robust pipe input handling
+                '-fflags', '+genpts+igndts+discardcorrupt',
+                '-avoid_negative_ts', 'make_zero',
+                '-thread_queue_size', '2048',             # Large buffer for smooth pipe read
+                '-analyzeduration', '20M',                # Deep format analysis
+                '-probesize', '20M',
+                '-i', 'pipe:0',                           # Read merged stream from yt-dlp
+                # Segmentation
                 '-f', 'segment',
                 '-segment_time', str(SEGMENT_DURATION),
+                '-segment_format', 'mp4',
                 '-segment_wrap', '0',
                 '-reset_timestamps', '1',
+                # Video: Complete re-encode for consistent output
                 '-c:v', 'h264_nvenc',
-                '-preset', 'fast',
+                '-preset', 'p4',                          # Balanced quality/speed
+                '-tune', 'hq',
                 '-rc', 'cbr',
-                '-b:v', '500k',
-                '-maxrate', '500k',
-                '-bufsize', '500k',
-                '-vf', 'scale=-2:720,fps=30',
+                '-b:v', '800k',                           # 800kbps for better quality
+                '-maxrate', '800k',
+                '-bufsize', '1600k',
+                '-profile:v', 'main',
+                '-level', '4.0',
+                '-pix_fmt', 'yuv420p',                    # Universal compatibility
+                '-vf', 'scale=-2:720,fps=30',             # Force 720p30
+                # Audio: Complete re-encode
                 '-c:a', 'aac',
-                '-b:a', '64k',
-                '-movflags', '+faststart',
+                '-b:a', '128k',
+                '-ar', '48000',
+                '-ac', '2',
+                # MP4 optimizations
+                '-movflags', '+faststart+frag_keyframe+empty_moov',
+                '-brand', 'mp42',
+                # Output
                 str(self.segments_dir / 'segment_%03d.mp4')
             ]
             
-            logger.info("Starting yt-dlp → FFmpeg pipe for VOD...")
-            logger.info(f"Recording compressed segments to {self.segments_dir} ({SEGMENT_DURATION}s each)")
+            logger.info("VOD Pipeline: yt-dlp (download+merge) → pipe → FFmpeg (encode+segment)")
+            logger.info(f"Output: 720p 800kbps segments in {self.segments_dir}")
             
-            # Start yt-dlp process
+            # Start yt-dlp: Downloads and merges video+audio, streams to stdout
             self.yt_dlp_process = subprocess.Popen(
                 yt_dlp_cmd,
-                stdout=subprocess.PIPE,
-                stderr=self.ffmpeg_log_file
+                stdout=subprocess.PIPE,                   # Pipe merged stream to FFmpeg
+                stderr=self.ffmpeg_log_file,
+                bufsize=16*1024*1024                      # 16MB buffer
             )
             
-            # Start FFmpeg process with yt-dlp output as input
+            # Start FFmpeg: Reads merged stream, encodes, segments
             self.recording_process = subprocess.Popen(
                 ffmpeg_cmd,
-                stdin=self.yt_dlp_process.stdout,
+                stdin=self.yt_dlp_process.stdout,         # Read yt-dlp's merged output
                 stdout=subprocess.DEVNULL,
-                stderr=self.ffmpeg_log_file
+                stderr=self.ffmpeg_log_file,
+                bufsize=16*1024*1024
             )
             
-            # Allow yt-dlp_process to receive SIGPIPE if FFmpeg exits
-            if self.yt_dlp_process.stdout:
-                self.yt_dlp_process.stdout.close()
+            # CRITICAL: Keep pipe open! yt-dlp streams continuously to FFmpeg.
+            # Closing stdout breaks the stream = audio-only or empty segments.
             
-            logger.info("VOD recording started (yt-dlp → FFmpeg pipe)")
+            logger.info("VOD recording started: streaming merged container to FFmpeg for processing")
             
         else:
             # Live stream mode: Direct FFmpeg recording from HLS URL (original behavior)
@@ -399,42 +435,58 @@ class LivestreamSummarizer:
                 logger.warning(f"Not enough new segments for overlapping cycle. Need up to index {end_index}, have {max_index}")
                 return False
 
-        # OPTIMIZATION: Instead of waiting for last segment to complete,
-        # wait for NEXT segment to start (proves all cycle segments are complete)
-        next_segment_index = end_index + 1
-        next_segment_path = self.segments_dir / f"segment_{next_segment_index:03d}.mp4"
+        # Check if recording is still active (FFmpeg running)
+        recording_active = self.recording_process and self.recording_process.poll() is None
         
-        logger.info(f"Waiting for next segment {next_segment_path.name} to start (ensures cycle segments are complete)...")
-        wait_start = time.time()
-        wait_timeout = SEGMENT_DURATION * 2  # Max 40 seconds wait
-        last_cycle_size = 0
-        
-        while time.time() - wait_start < wait_timeout:
-            if next_segment_path.exists() and next_segment_path.stat().st_size > 0:
-                print()  # New line after the finalizing status
-                logger.info(f"Next segment {next_segment_path.name} started, cycle segments are complete")
-                break
+        if recording_active:
+            # OPTIMIZATION: Instead of waiting for last segment to complete,
+            # wait for NEXT segment to start (proves all cycle segments are complete)
+            next_segment_index = end_index + 1
+            next_segment_path = self.segments_dir / f"segment_{next_segment_index:03d}.mp4"
             
-            # Update last segment size in real-time
+            logger.info(f"Waiting for next segment {next_segment_path.name} to start (ensures cycle segments are complete)...")
+            wait_start = time.time()
+            wait_timeout = SEGMENT_DURATION * 2  # Max 60 seconds wait
+            last_cycle_size = 0
+            
+            while time.time() - wait_start < wait_timeout:
+                if next_segment_path.exists() and next_segment_path.stat().st_size > 0:
+                    print()  # New line after the finalizing status
+                    logger.info(f"Next segment {next_segment_path.name} started, cycle segments are complete")
+                    break
+                
+                # Update last segment size in real-time
+                last_segment_path = self.segments_dir / f"segment_{end_index:03d}.mp4"
+                if last_segment_path.exists():
+                    try:
+                        current_size = last_segment_path.stat().st_size
+                        if current_size != last_cycle_size:
+                            last_cycle_size = current_size
+                            size_mb = current_size / (1024 * 1024)
+                            print(f"\r🔄 Finalizing: {last_segment_path.name} ({size_mb:.1f} MB)", end='', flush=True)
+                    except OSError:
+                        pass
+                
+                time.sleep(0.5)
+            else:
+                print()  # New line after the finalizing status
+                logger.warning(f"Timeout waiting for {next_segment_path.name}, proceeding with validation...")
+                # Fallback: validate the last segment in cycle
+                last_segment_path = self.segments_dir / f"segment_{end_index:03d}.mp4"
+                if not self.wait_for_segment_completion(last_segment_path, timeout=SEGMENT_DURATION):
+                    logger.error(f"Failed to validate {last_segment_path.name}")
+                    return False
+        else:
+            # Recording finished (FFmpeg exited), all segments already complete
+            logger.info(f"Recording complete, validating cycle segments {start_index} to {end_index}...")
+            # Just validate the last segment to ensure it's complete
             last_segment_path = self.segments_dir / f"segment_{end_index:03d}.mp4"
             if last_segment_path.exists():
-                try:
-                    current_size = last_segment_path.stat().st_size
-                    if current_size != last_cycle_size:
-                        last_cycle_size = current_size
-                        size_mb = current_size / (1024 * 1024)
-                        print(f"\r🔄 Finalizing: {last_segment_path.name} ({size_mb:.1f} MB)", end='', flush=True)
-                except OSError:
-                    pass
-            
-            time.sleep(0.5)
-        else:
-            print()  # New line after the finalizing status
-            logger.warning(f"Timeout waiting for {next_segment_path.name}, proceeding with validation...")
-            # Fallback: validate the last segment in cycle
-            last_segment_path = self.segments_dir / f"segment_{end_index:03d}.mp4"
-            if not self.wait_for_segment_completion(last_segment_path, timeout=SEGMENT_DURATION):
-                logger.error(f"Failed to validate {last_segment_path.name}")
+                if not self.validate_segment(last_segment_path, log_on_success=True, log_on_failure=True):
+                    logger.error(f"Failed to validate {last_segment_path.name}")
+                    return False
+            else:
+                logger.error(f"Missing final segment: {last_segment_path.name}")
                 return False
 
         # Extract the segments for this cycle
@@ -588,15 +640,17 @@ class LivestreamSummarizer:
             logger.info(f"Video uploaded successfully. File URI: {video_file.uri}")
 
             # Poll until the file is ACTIVE
-            logger.info("Waiting for file to become ACTIVE...")
+            print("⏳ Waiting for file to become ACTIVE...", end='', flush=True)
             poll_count = 0
             while video_file.state.name == "PROCESSING":
+                print(".", end='', flush=True)  # Show progress dots
                 time.sleep(5)
                 video_file = self.client.files.get(name=video_file.name)
                 poll_count += 1
-                if poll_count % 6 == 0:  # Log every 30 seconds
-                    logger.info(f"File still processing... (checked {poll_count} times)")
-
+                if poll_count % 6 == 0:  # Log every 30 seconds (6 * 5s = 30s)
+                    print(f" ({poll_count * 5}s)", end='', flush=True)
+            print()  # New line after polling complete
+            
             if video_file.state.name != "ACTIVE":
                 error_msg = f"File upload failed or did not become ACTIVE: {video_file.state.name}"
                 logger.error(error_msg)
@@ -653,15 +707,44 @@ class LivestreamSummarizer:
                     
                     logger.info(f"Including {len(previous_summaries)} previous summary/summaries for context")
             
-            response = self.client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[
-                    types.Part.from_text(text=final_prompt),
-                    types.Part.from_uri(file_uri=video_file.uri, mime_type=video_file.mime_type)
-                ],
-                config=config
-            )
-            summary = response.text
+            # Retry logic for transient Gemini API errors (500 INTERNAL, rate limits)
+            max_retries = GEMINI_MAX_RETRIES
+            
+            for attempt in range(max_retries):
+                try:
+                    response = self.client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=[
+                            types.Part.from_text(text=final_prompt),
+                            types.Part.from_uri(file_uri=video_file.uri, mime_type=video_file.mime_type)
+                        ],
+                        config=config
+                    )
+                    summary = response.text
+                    break  # Success, exit retry loop
+                except Exception as api_error:
+                    error_str = str(api_error).lower()
+                    
+                    # Check if it's a transient error (500, rate limit, etc.)
+                    is_transient_error = any([
+                        '500' in error_str,
+                        'internal' in error_str,
+                        'rate limit' in error_str,
+                        'quota' in error_str,
+                        '429' in error_str,
+                        'resource exhausted' in error_str
+                    ])
+                    
+                    if is_transient_error and attempt < max_retries - 1:
+                        # Use GEMINI_RETRY_DELAY for rate limits and transient errors
+                        logger.warning(f"Gemini API transient error (attempt {attempt + 1}/{max_retries}): {api_error}")
+                        logger.warning(f"Retrying in {GEMINI_RETRY_DELAY}s...")
+                        print(f"⚠️ Gemini API temporary error, retrying in {GEMINI_RETRY_DELAY}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(GEMINI_RETRY_DELAY)
+                        continue
+                    else:
+                        # Not a transient error or final attempt, re-raise
+                        raise
             if summary and summary.strip():
                 logger.info("Summary generated successfully")
                 return summary
@@ -813,14 +896,6 @@ class LivestreamSummarizer:
         # Check if already processing
         if self.processing:
             return
-        
-        # Rate limiting for VOD: Enforce 2-minute cooldown between Gemini API calls
-        if self.is_vod:
-            time_since_last_call = time.time() - self.last_gemini_call_time
-            if self.last_gemini_call_time > 0 and time_since_last_call < 120:
-                wait_time = 120 - time_since_last_call
-                logger.info(f"⏳ VOD rate limiting: Waiting {wait_time:.1f}s before next Gemini API call...")
-                return  # Skip this cycle, will retry in next iteration
             
         logger.info("=== Starting summarization cycle ===")
         self.processing = True
@@ -900,19 +975,7 @@ class LivestreamSummarizer:
             # Summarize the final video
             logger.info("Generating final summary...")
             
-            # Apply rate limiting for VOD if needed
-            if self.is_vod and self.last_gemini_call_time > 0:
-                time_since_last_call = time.time() - self.last_gemini_call_time
-                if time_since_last_call < 120:
-                    wait_time = 120 - time_since_last_call
-                    logger.info(f"⏳ VOD rate limiting: Waiting {wait_time:.1f}s before final Gemini API call...")
-                    time.sleep(wait_time)
-            
             summary = self.summarize_with_gemini()
-            
-            # Record API call time for VOD
-            if self.is_vod:
-                self.last_gemini_call_time = time.time()
             
             if summary:
                 timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -962,10 +1025,6 @@ class LivestreamSummarizer:
                     logger.info(f"Retrying summarization (attempt {attempt}/{max_retries})...")
                 
                 summary = self.summarize_with_gemini()
-                
-                # Record Gemini API call time for VOD rate limiting
-                if self.is_vod:
-                    self.last_gemini_call_time = time.time()
                 
                 if summary:
                     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -1017,6 +1076,9 @@ class LivestreamSummarizer:
         current_recording_size = 0
         no_growth_start = None
         last_max_index = -1
+        stall_warning_count = 0  # Track consecutive stall warnings
+        vod_complete_logged = False  # Track if VOD completion message already shown
+        ffmpeg_exited = False  # Track if FFmpeg has exited (stop recording status display)
         
         try:
             while True:
@@ -1084,17 +1146,30 @@ class LivestreamSummarizer:
                         logger.info(f"Full FFmpeg log available at: {ffmpeg_log}")
                         break
                     else:
-                        logger.info(f"FFmpeg process exited cleanly with code {exit_code} after {runtime:.1f} seconds")
-                        logger.info("Stream has ended naturally, processing remaining segments...")
-                        
-                        # Wait a moment for any final segments to be written
-                        time.sleep(3)
-                        
-                        # Process any remaining segments
-                        self.process_remaining_segments()
-                        
-                        logger.info("All processing completed. Exiting.")
-                        break
+                        if not ffmpeg_exited:  # Only process once
+                            print()  # Clear the recording status line
+                            ffmpeg_exited = True  # Stop recording status display
+                        if self.is_vod_mode:
+                            # VOD: Download complete, but continue cycling through segments normally
+                            if not vod_complete_logged:
+                                logger.info(f"FFmpeg process exited cleanly with code {exit_code} after {runtime:.1f} seconds")
+                                logger.info("VOD download complete. Continuing to process segments in cycles...")
+                                logger.info("Program will continue until all segments are summarized.")
+                                vod_complete_logged = True  # Only log once
+                            # Don't break - continue the loop to process remaining cycles
+                        else:
+                            logger.info(f"FFmpeg process exited cleanly with code {exit_code} after {runtime:.1f} seconds")
+                            # Live stream: Natural end, process remaining segments
+                            logger.info("Live stream ended naturally, processing remaining segments...")
+                            
+                            # Wait a moment for any final segments to be written
+                            time.sleep(3)
+                            
+                            # Process any remaining segments
+                            self.process_remaining_segments()
+                            
+                            logger.info("All processing completed. Exiting.")
+                            break
                 
                 # Check and log segment accumulation progress
                 segments = list(self.segments_dir.glob('segment_*.mp4'))
@@ -1115,20 +1190,39 @@ class LivestreamSummarizer:
                                 # Check if FFmpeg is still running
                                 if self.recording_process and self.recording_process.poll() is None:
                                     # FFmpeg is still running but segments stopped - network stall
-                                    logger.warning(f"No new segments for {STALL_TIMEOUT}s but FFmpeg still running - likely network stall")
-                                    logger.warning("Please manually restart if stream is actually still live")
-                                    logger.info("Continuing to monitor... (segments will resume if connection recovers)")
-                                    no_growth_start = time.time()  # Reset timer to give more time
+                                    stall_warning_count += 1
+                                    logger.warning(f"No new segments for {STALL_TIMEOUT}s but FFmpeg still running - likely network stall (warning {stall_warning_count}/{MAX_STALL_WARNINGS})")
+                                    
+                                    if stall_warning_count >= MAX_STALL_WARNINGS:
+                                        # After MAX_STALL_WARNINGS warnings, consider stream ended
+                                        logger.warning(f"Stream stalled for {STALL_TIMEOUT * MAX_STALL_WARNINGS}s total. Considering stream ended.")
+                                        logger.info("Processing remaining segments...")
+                                        self.stop_recording()
+                                        self.process_remaining_segments()
+                                        logger.info("All processing completed. Exiting.")
+                                        break
+                                    else:
+                                        logger.warning("Please manually restart if stream is actually still live")
+                                        logger.info("Continuing to monitor... (segments will resume if connection recovers)")
+                                        no_growth_start = time.time()  # Reset timer to give more time
                                 else:
-                                    # FFmpeg has exited - stream truly ended
-                                    logger.warning(f"No new segments detected for {STALL_TIMEOUT} seconds and FFmpeg has exited")
-                                    logger.info("Processing remaining segments...")
-                                    self.process_remaining_segments()
-                                    logger.info("All processing completed. Exiting.")
-                                    break
+                                    # FFmpeg has exited
+                                    if self.is_vod_mode:
+                                        # VOD: FFmpeg exited is normal, continue cycling through segments
+                                        # Don't trigger remaining segments processing - let VOD completion check handle it
+                                        logger.info(f"VOD: No new segments for {STALL_TIMEOUT}s (download complete), continuing to process existing segments...")
+                                        no_growth_start = None  # Reset to avoid re-triggering
+                                    else:
+                                        # Live stream: FFmpeg exited + no new segments = stream truly ended
+                                        logger.warning(f"No new segments detected for {STALL_TIMEOUT} seconds and FFmpeg has exited")
+                                        logger.info("Processing remaining segments...")
+                                        self.process_remaining_segments()
+                                        logger.info("All processing completed. Exiting.")
+                                        break
                         else:
                             no_growth_start = None
                             last_max_index = current_max_index
+                            stall_warning_count = 0  # Reset counter when new segments arrive
                         
                         if self.last_end_index == -1:
                             required_max_index = NUM_SEGMENTS - 1
@@ -1142,40 +1236,62 @@ class LivestreamSummarizer:
                     except ValueError:
                         logger.warning("Could not parse segment indices")
                 
-                # Log segment progress only when count changes
-                if current_count != last_segment_count and current_count < NUM_SEGMENTS:
+                # VOD mode: Check if download finished AND all segments processed
+                if self.is_vod_mode and self.recording_process and self.recording_process.poll() is not None:
+                    # Download complete, check if all segments summarized
+                    if not self.processing:  # No active summarization
+                        segments_list = sorted(self.segments_dir.glob('segment_*.mp4'))
+                        if segments_list:
+                            try:
+                                max_segment_index = max(int(seg.stem.split('_')[1]) for seg in segments_list if seg.stem.split('_')[1].isdigit())
+                                # Check if we've processed all segments
+                                if self.last_end_index >= max_segment_index:
+                                    print()  # New line after recording status
+                                    logger.info(f"VOD complete: All {max_segment_index + 1} segments have been summarized.")
+                                    logger.info("All processing completed. Exiting.")
+                                    break
+                            except (ValueError, IndexError):
+                                pass
+                
+                # Log segment progress only when count changes (and only if FFmpeg still running)
+                if not ffmpeg_exited and current_count != last_segment_count and current_count < NUM_SEGMENTS:
                     logger.info(f"Segments accumulated: {current_count}/{NUM_SEGMENTS} ({NUM_SEGMENTS - current_count} remaining)")
                     last_segment_count = current_count
                 
-                # Update current recording file size every 5 seconds
-                current_time = time.time()
-                if current_time - last_size_update >= 5:
-                    # Calculate elapsed time
-                    elapsed_seconds = int(current_time - self.program_start_time)
-                    hours = elapsed_seconds // 3600
-                    minutes = (elapsed_seconds % 3600) // 60
-                    seconds = elapsed_seconds % 60
-                    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                    
-                    if segments:
-                        # Get the current segment being recorded (highest index)
-                        try:
-                            current_segment = max(segments, key=lambda s: int(s.stem.split('_')[1]))
-                            new_size = current_segment.stat().st_size
-                            if new_size != current_recording_size:
-                                current_recording_size = new_size
-                                # Update the same line with current file size and elapsed time
-                                size_mb = current_recording_size / (1024 * 1024)
-                                print(f"\r📹 Recording: {current_segment.name} ({size_mb:.1f} MB) | ⏱️ {elapsed_str}", end='', flush=True)
-                        except (ValueError, OSError):
-                            pass
-                    else:
-                        # Show elapsed time even if no segments yet
-                        print(f"\r⏱️ Elapsed: {elapsed_str}", end='', flush=True)
-                    
-                    last_size_update = current_time
+                # Update current recording file size every 5 seconds (only if FFmpeg is still running)
+                if not ffmpeg_exited:
+                    current_time = time.time()
+                    if current_time - last_size_update >= 5:
+                        # Calculate elapsed time
+                        elapsed_seconds = int(current_time - self.program_start_time)
+                        hours = elapsed_seconds // 3600
+                        minutes = (elapsed_seconds % 3600) // 60
+                        seconds = elapsed_seconds % 60
+                        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                        
+                        if segments:
+                            # Get the current segment being recorded (highest index)
+                            try:
+                                current_segment = max(segments, key=lambda s: int(s.stem.split('_')[1]))
+                                new_size = current_segment.stat().st_size
+                                if new_size != current_recording_size:
+                                    current_recording_size = new_size
+                                    # Update the same line with current file size and elapsed time
+                                    size_mb = current_recording_size / (1024 * 1024)
+                                    print(f"\r📹 Recording: {current_segment.name} ({size_mb:.1f} MB) | ⏱️ {elapsed_str}", end='', flush=True)
+                            except (ValueError, OSError):
+                                pass
+                        else:
+                            # Show elapsed time even if no segments yet
+                            print(f"\r⏱️ Elapsed: {elapsed_str}", end='', flush=True)
+                        
+                        last_size_update = current_time
                 
-                time.sleep(1)
+                # Slow down loop when FFmpeg has exited to avoid interfering with background processing
+                if ffmpeg_exited and self.processing:
+                    time.sleep(5)  # Slower polling when processing in background
+                else:
+                    time.sleep(1)
         except KeyboardInterrupt:
             print()  # New line after the recording status
             logger.info("Stopping...")
