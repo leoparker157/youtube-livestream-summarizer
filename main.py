@@ -189,8 +189,9 @@ class LivestreamSummarizer:
                 '--concurrent-fragments', '5',
                 '--buffer-size', '16M',
                 '--http-chunk-size', '10M',
-                # Bypass bot detection
-                '--extractor-args', 'youtube:player_client=android',
+                # Bypass bot detection - multiple clients
+                '--extractor-args', 'youtube:player_client=android,android_music',
+                '--user-agent', 'Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Mobile Safari/537.36',
                 # Output complete container to stdout (yt-dlp merges if needed)
                 '-o', '-',
                 self.hls_url
@@ -1320,7 +1321,10 @@ def main():
         # Check if it's a livestream or VOD
         try:
             check_result = subprocess.run(
-                ['yt-dlp', '--print', '%(is_live)s', url],
+                ['yt-dlp', '--print', '%(is_live)s',
+                 '--extractor-args', 'youtube:player_client=android,android_music',
+                 '--user-agent', 'Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Mobile Safari/537.36',
+                 url],
                 capture_output=True,
                 text=True,
                 timeout=30

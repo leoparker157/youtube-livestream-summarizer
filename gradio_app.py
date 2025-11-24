@@ -243,7 +243,8 @@ class LivestreamSummarizerGradio:
             '--concurrent-fragments', '5',     # Download 5 fragments in parallel for faster download
             '--buffer-size', '16M',            # 16MB buffer to prevent stalls
             '--http-chunk-size', '10M',        # 10MB chunks for efficient streaming
-            '--extractor-args', 'youtube:player_client=android',  # Bypass bot detection
+            '--extractor-args', 'youtube:player_client=android,android_music',  # Multiple clients to bypass bot detection
+            '--user-agent', 'Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Mobile Safari/537.36',  # Android user agent
             '-o', '-',
             self.youtube_url
         ]
@@ -607,6 +608,9 @@ class LivestreamSummarizerGradio:
         except Exception as e:
             self.log_progress(f"❌ Background summarization error: {e}")
             logger.error(f"Background error: {e}")
+        finally:
+            # Release processing flag so next cycle can start
+            self.processing = False
     
     def cleanup_old_segments(self, segments_dir, overlap_segments):
         """Clean up old segments to prevent unlimited disk usage.
@@ -685,7 +689,10 @@ class LivestreamSummarizerGradio:
             yield self.log_progress("🔍 Detecting if live or VOD..."), ""
             try:
                 check_result = subprocess.run(
-                    ['yt-dlp', '--print', '%(is_live)s', '--extractor-args', 'youtube:player_client=android', youtube_url],
+                    ['yt-dlp', '--print', '%(is_live)s', 
+                     '--extractor-args', 'youtube:player_client=android,android_music',
+                     '--user-agent', 'Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Mobile Safari/537.36',
+                     youtube_url],
                     capture_output=True,
                     text=True,
                     timeout=30
@@ -1086,10 +1093,27 @@ class LivestreamSummarizerGradio:
                         yield self.log_progress("✅ Summarization running in background"), "\n".join(self.summaries)
                     else:
                         yield self.log_progress("❌ Concatenation failed"), "\n".join(self.summaries)
-                    
-                    # Release processing flag immediately so next cycle can start
-                    self.processing = False
-                else:
+                        self.processing = False  # Only release if concatenation failed
+                
+                # VOD mode: Check if download finished AND all segments processed
+                if self.is_vod and self.recording_process and self.recording_process.poll() is not None:
+                    # Download complete, check if all segments summarized
+                    if not self.processing:  # No active summarization
+                        segments_list = sorted(segments_dir.glob('segment_*.mp4'))
+                        if segments_list:
+                            try:
+                                max_segment_index = max(int(seg.stem.split('_')[1]) for seg in segments_list if seg.stem.split('_')[1].isdigit())
+                                # Check if we've processed all segments
+                                if self.last_end_index >= max_segment_index:
+                                    yield self.log_progress(""), "\n".join(self.summaries)
+                                    yield self.log_progress(f"✅ VOD complete: All {max_segment_index + 1} segments have been summarized."), "\n".join(self.summaries)
+                                    yield self.log_progress("✅ All processing completed."), "\n".join(self.summaries)
+                                    break
+                            except (ValueError, IndexError):
+                                pass
+                
+                # Show waiting status if not processing
+                if not can_process:
                     # Show waiting status with live file size update like main.py
                     if segments:
                         try:
