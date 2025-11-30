@@ -38,7 +38,7 @@ GEMINI_MAX_RETRIES = 3  # Number of retries for Gemini API calls
 GEMINI_RETRY_DELAY = 30  # Seconds to wait between Gemini retries
 
 # Stream Monitoring Configuration
-STALL_TIMEOUT = 60  # Seconds to wait before checking if stream has stalled (network issue or stream end)
+STALL_TIMEOUT = 20 + SEGMENT_DURATION  # Seconds to wait before checking if stream has stalled (must be > SEGMENT_DURATION to avoid false positives)
 MAX_STALL_WARNINGS = 3  # Number of consecutive stall warnings before considering stream ended (total: STALL_TIMEOUT * MAX_STALL_WARNINGS)
 
 # Gemini Configuration
@@ -137,6 +137,10 @@ class LivestreamSummarizer:
         
         # Processing flag to prevent concurrent cycles
         self.processing = False
+        
+        # Consecutive validation failure counter (for detecting stuck/broken segments)
+        self.consecutive_validation_failures = 0
+        self.should_exit_due_to_failures = False  # Flag to signal exit from main loop
         
         # Storage for previous summaries (raw text only for context)
         self.summary_texts_only = []
@@ -327,6 +331,84 @@ class LivestreamSummarizer:
                 logger.error(f"Error validating {segment_path.name}: {e}")
             return False
 
+    def restart_recording(self):
+        """Restart FFmpeg recording for livestreams (not VOD)."""
+        if self.is_vod_mode:
+            logger.warning("Cannot restart recording in VOD mode")
+            return False
+        
+        logger.info("🔄 Restarting FFmpeg to recover from network stall...")
+        
+        try:
+            # Stop current recording
+            if self.recording_process:
+                logger.info("Stopping FFmpeg recording process...")
+                try:
+                    self.recording_process.terminate()
+                    self.recording_process.wait(timeout=5)
+                except:
+                    self.recording_process.kill()
+                    self.recording_process.wait()
+                logger.info("FFmpeg stopped.")
+            
+            # Close old log file
+            if self.ffmpeg_log_file:
+                try:
+                    self.ffmpeg_log_file.close()
+                except:
+                    pass
+            
+            # Get current segment count to continue numbering
+            segments = sorted(self.segments_dir.glob('segment_*.mp4'))
+            if segments:
+                try:
+                    max_index = max(int(seg.stem.split('_')[1]) for seg in segments)
+                    next_segment = max_index + 1
+                    logger.info(f"Resuming from segment {next_segment:03d}")
+                except (ValueError, IndexError):
+                    next_segment = 0
+                    logger.warning("Could not parse segment numbers, starting from 0")
+            else:
+                next_segment = 0
+                logger.info("No segments found, starting from 0")
+            
+            # Reopen log file
+            ffmpeg_log = Path(__file__).parent / "ffmpeg.log"
+            self.ffmpeg_log_file = open(ffmpeg_log, 'ab')  # Append mode
+            
+            # Restart FFmpeg (live stream mode only)
+            cmd = [
+                'ffmpeg',
+                '-i', self.hls_url,
+                '-f', 'segment',
+                '-segment_time', str(SEGMENT_DURATION),
+                '-segment_start_number', str(next_segment),  # Continue from where we left off
+                '-segment_wrap', '0',
+                '-reset_timestamps', '1',
+                '-c:v', 'h264_nvenc',
+                '-preset', 'fast',
+                '-rc', 'cbr',
+                '-b:v', '500k',
+                '-maxrate', '500k',
+                '-bufsize', '500k',
+                '-vf', 'scale=-2:720,fps=30',
+                '-c:a', 'aac',
+                '-b:a', '64k',
+                '-movflags', '+faststart',
+                str(self.segments_dir / 'segment_%03d.mp4')
+            ]
+            
+            self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=self.ffmpeg_log_file)
+            self.recording_start_time = time.time()
+            time.sleep(3)  # Wait for FFmpeg to initialize
+            
+            logger.info("✅ FFmpeg restarted successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to restart FFmpeg: {e}")
+            return False
+
     def stop_recording(self):
         """Stop the recording process."""
         # Stop yt-dlp process first (if VOD mode)
@@ -476,7 +558,21 @@ class LivestreamSummarizer:
                 last_segment_path = self.segments_dir / f"segment_{end_index:03d}.mp4"
                 if not self.wait_for_segment_completion(last_segment_path, timeout=SEGMENT_DURATION):
                     logger.error(f"Failed to validate {last_segment_path.name}")
-                    return False
+                    
+                    # If FFmpeg is still running but segment is broken, trigger restart (live stream only)
+                    if not self.is_vod_mode and self.recording_process and self.recording_process.poll() is None:
+                        logger.warning("🚨 Segment validation failed during active recording - likely network stall")
+                        logger.info("🔄 Attempting FFmpeg restart to recover...")
+                        if self.restart_recording():
+                            logger.info("✅ FFmpeg restarted after segment validation failure")
+                            # Return False to skip this cycle, next cycle will use new segments
+                            return False
+                        else:
+                            logger.error("❌ FFmpeg restart failed after segment validation failure")
+                            return False
+                    else:
+                        # VOD mode or FFmpeg already stopped - just fail the cycle
+                        return False
         else:
             # Recording finished (FFmpeg exited), all segments already complete
             logger.info(f"Recording complete, validating cycle segments {start_index} to {end_index}...")
@@ -512,8 +608,34 @@ class LivestreamSummarizer:
         
         if len(valid_segments) != len(cycle_segments):
             logger.warning(f"Some segments invalid. Expected {len(cycle_segments)}, got {len(valid_segments)}")
+            
+            # Track consecutive validation failures
+            self.consecutive_validation_failures += 1
+            logger.warning(f"Consecutive validation failures: {self.consecutive_validation_failures}/{MAX_STALL_WARNINGS}")
+            
+            # If too many consecutive failures, try to restart or exit
+            if self.consecutive_validation_failures >= MAX_STALL_WARNINGS:
+                # Check if FFmpeg is still running
+                if self.recording_process and self.recording_process.poll() is None:
+                    # FFmpeg running but producing broken segments - try restart (live only)
+                    if not self.is_vod_mode:
+                        logger.warning(f"🚨 {MAX_STALL_WARNINGS} consecutive validation failures - attempting FFmpeg restart")
+                        if self.restart_recording():
+                            logger.info("✅ FFmpeg restarted after validation failures")
+                            self.consecutive_validation_failures = 0  # Reset counter
+                        else:
+                            logger.error("❌ FFmpeg restart failed")
+                else:
+                    # FFmpeg has exited and segments are broken - signal to exit
+                    logger.error(f"🛑 FFmpeg exited and {MAX_STALL_WARNINGS} consecutive validation failures")
+                    logger.error("Stream has ended with corrupted final segments")
+                    # Mark as needing exit by setting a flag
+                    self.should_exit_due_to_failures = True
+            
             return False
         
+        # Reset failure counter on successful validation
+        self.consecutive_validation_failures = 0
         latest_segments = valid_segments
         
         # Update tracking
@@ -1085,6 +1207,15 @@ class LivestreamSummarizer:
             while True:
                 schedule.run_pending()  # Keep for any other scheduled tasks
                 
+                # Check if we should exit due to consecutive validation failures
+                if self.should_exit_due_to_failures:
+                    print()  # New line after recording status
+                    logger.error("🛑 Exiting due to consecutive segment validation failures")
+                    logger.info("Processing remaining valid segments before exit...")
+                    self.process_remaining_segments()
+                    logger.info("All processing completed. Exiting.")
+                    break
+                
                 # Check if FFmpeg process has exited (stream ended)
                 if self.recording_process and self.recording_process.poll() is not None:
                     print()  # New line after the recording status
@@ -1195,17 +1326,24 @@ class LivestreamSummarizer:
                                     logger.warning(f"No new segments for {STALL_TIMEOUT}s but FFmpeg still running - likely network stall (warning {stall_warning_count}/{MAX_STALL_WARNINGS})")
                                     
                                     if stall_warning_count >= MAX_STALL_WARNINGS:
-                                        # After MAX_STALL_WARNINGS warnings, consider stream ended
-                                        logger.warning(f"Stream stalled for {STALL_TIMEOUT * MAX_STALL_WARNINGS}s total. Considering stream ended.")
+                                        # After MAX_STALL_WARNINGS restart attempts, consider stream ended
+                                        logger.warning(f"Stream stalled for {STALL_TIMEOUT * MAX_STALL_WARNINGS}s total ({MAX_STALL_WARNINGS} restart attempts failed). Considering stream ended.")
                                         logger.info("Processing remaining segments...")
                                         self.stop_recording()
                                         self.process_remaining_segments()
                                         logger.info("All processing completed. Exiting.")
                                         break
                                     else:
-                                        logger.warning("Please manually restart if stream is actually still live")
-                                        logger.info("Continuing to monitor... (segments will resume if connection recovers)")
-                                        no_growth_start = time.time()  # Reset timer to give more time
+                                        # Attempt to restart FFmpeg to recover from network stall
+                                        logger.info(f"🔄 Attempting FFmpeg restart (attempt {stall_warning_count}/{MAX_STALL_WARNINGS})...")
+                                        if self.restart_recording():
+                                            logger.info("✅ FFmpeg restarted, continuing from current segment")
+                                            no_growth_start = time.time()  # Reset timer after restart
+                                            # Keep stall_warning_count to track restart attempts
+                                        else:
+                                            logger.error("❌ FFmpeg restart failed")
+                                            logger.warning("Continuing to monitor in case connection recovers...")
+                                            no_growth_start = time.time()  # Reset timer to give more time
                                 else:
                                     # FFmpeg has exited
                                     if self.is_vod_mode:
