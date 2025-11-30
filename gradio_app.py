@@ -88,6 +88,10 @@ class LivestreamSummarizerGradio:
         self.new_summary_available = False  # Flag for background thread updates
         self.include_previous_summaries = 0  # Dynamic setting for context inclusion
         
+        # Consecutive validation failure counter (for detecting stuck/broken segments)
+        self.consecutive_validation_failures = 0
+        self.should_exit_due_to_failures = False  # Flag to signal exit from main loop
+        
     def log_progress(self, message):
         """Add message to progress log"""
         timestamp = time.strftime('%H:%M:%S')
@@ -392,7 +396,29 @@ class LivestreamSummarizerGradio:
         
         if len(valid_segments) != len(segment_files):
             logger.warning(f"Some segments invalid. Expected {len(segment_files)}, got {len(valid_segments)}")
+            
+            # Track consecutive validation failures (like main.py)
+            self.consecutive_validation_failures += 1
+            logger.warning(f"Consecutive validation failures: {self.consecutive_validation_failures}/3")
+            
+            # If too many consecutive failures, signal to exit
+            if self.consecutive_validation_failures >= 3:
+                # Check if FFmpeg is still running
+                if self.recording_process and self.recording_process.poll() is None:
+                    # FFmpeg running but producing broken segments - try restart
+                    if not self.is_vod_mode:
+                        logger.warning(f"🚨 3 consecutive validation failures - attempting FFmpeg restart")
+                        # Restart will be handled by the main loop's stall detection
+                else:
+                    # FFmpeg has exited and segments are broken - signal to exit
+                    logger.error(f"🛑 FFmpeg exited and 3 consecutive validation failures")
+                    logger.error("Stream has ended with corrupted final segments")
+                    self.should_exit_due_to_failures = True
+            
             return False
+        
+        # Reset failure counter on successful validation
+        self.consecutive_validation_failures = 0
         
         # Check for empty segments
         empty_segments = [seg for seg in segment_files if seg.stat().st_size == 0]
@@ -682,7 +708,11 @@ class LivestreamSummarizerGradio:
         self.last_restart_time = 0  # Reset restart time
         self.youtube_url = youtube_url  # Store for FFmpeg restart
         self.is_vod = False  # Reset VOD flag
+        self.is_vod_mode = False  # Reset VOD mode flag
+        self.vod_complete_logged = False  # Reset VOD completion log flag
         self.last_gemini_call_time = 0  # Reset rate limiting
+        self.consecutive_validation_failures = 0  # Reset validation failure counter
+        self.should_exit_due_to_failures = False  # Reset exit flag
         
         # Detect if VOD or live stream
         if 'youtube.com' in youtube_url or 'youtu.be' in youtube_url:
@@ -755,6 +785,14 @@ class LivestreamSummarizerGradio:
         
         try:
             while not self.should_stop:
+                # Check if we should exit due to consecutive validation failures
+                if self.should_exit_due_to_failures:
+                    yield self.log_progress("🛑 Exiting due to consecutive segment validation failures"), "\n".join(self.summaries)
+                    yield self.log_progress("Processing remaining valid segments before exit..."), "\n".join(self.summaries)
+                    # Process remaining segments would go here if implemented
+                    yield self.log_progress("All processing completed. Exiting."), "\n".join(self.summaries)
+                    break
+                
                 # Check if FFmpeg or yt-dlp process died
                 ffmpeg_dead = self.recording_process and self.recording_process.poll() is not None
                 ytdlp_dead = self.yt_dlp_process and self.yt_dlp_process.poll() is not None

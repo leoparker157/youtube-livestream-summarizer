@@ -17,6 +17,21 @@ import schedule
 import google.genai as genai
 from google.genai import types
 
+# Fix Windows console encoding for Unicode characters (Japanese, etc.)
+if sys.platform == 'win32':
+    # Set console to UTF-8 mode
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except:
+        pass
+    # Also set stdout/stderr encoding
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # Configuration Constants
 VIDEO_DURATION_SECONDS = 180  # Duration of video clips to send to Gemini (in seconds)
 SEGMENT_DURATION = 30  # Duration of each video segment (in seconds)
@@ -272,6 +287,19 @@ class LivestreamSummarizer:
             
             cmd = [
                 'ffmpeg',
+                # Network resilience options (before -i)
+                '-reconnect', '1',                        # Enable reconnection on disconnect
+                '-reconnect_streamed', '1',               # Reconnect even for streamed content
+                '-reconnect_delay_max', '5',              # Max 5 seconds between reconnect attempts
+                '-reconnect_on_network_error', '1',       # Reconnect on network errors
+                '-reconnect_on_http_error', '4xx,5xx',    # Reconnect on HTTP errors
+                '-rw_timeout', '10000000',                # 10 second read/write timeout (microseconds)
+                '-timeout', '10000000',                   # 10 second connection timeout (microseconds)
+                '-analyzeduration', '10M',                # Analyze up to 10MB for format detection
+                '-probesize', '10M',                      # Probe up to 10MB for format detection
+                '-fflags', '+genpts+discardcorrupt',      # Generate PTS, discard corrupt frames
+                '-flags', 'low_delay',                    # Low latency mode
+                '-strict', 'experimental',                # Allow experimental features
                 '-i', self.hls_url,
                 '-f', 'segment',
                 '-segment_time', str(SEGMENT_DURATION),
@@ -376,9 +404,22 @@ class LivestreamSummarizer:
             ffmpeg_log = Path(__file__).parent / "ffmpeg.log"
             self.ffmpeg_log_file = open(ffmpeg_log, 'ab')  # Append mode
             
-            # Restart FFmpeg (live stream mode only)
+            # Restart FFmpeg (live stream mode only) with network resilience options
             cmd = [
                 'ffmpeg',
+                # Network resilience options (before -i)
+                '-reconnect', '1',                        # Enable reconnection on disconnect
+                '-reconnect_streamed', '1',               # Reconnect even for streamed content
+                '-reconnect_delay_max', '5',              # Max 5 seconds between reconnect attempts
+                '-reconnect_on_network_error', '1',       # Reconnect on network errors
+                '-reconnect_on_http_error', '4xx,5xx',    # Reconnect on HTTP errors
+                '-rw_timeout', '10000000',                # 10 second read/write timeout (microseconds)
+                '-timeout', '10000000',                   # 10 second connection timeout (microseconds)
+                '-analyzeduration', '10M',                # Analyze up to 10MB for format detection
+                '-probesize', '10M',                      # Probe up to 10MB for format detection
+                '-fflags', '+genpts+discardcorrupt',      # Generate PTS, discard corrupt frames
+                '-flags', 'low_delay',                    # Low latency mode
+                '-strict', 'experimental',                # Allow experimental features
                 '-i', self.hls_url,
                 '-f', 'segment',
                 '-segment_time', str(SEGMENT_DURATION),
@@ -1207,6 +1248,9 @@ class LivestreamSummarizer:
             while True:
                 schedule.run_pending()  # Keep for any other scheduled tasks
                 
+                # Cache FFmpeg poll result to avoid redundant syscalls
+                ffmpeg_has_exited = self.recording_process and self.recording_process.poll() is not None
+                
                 # Check if we should exit due to consecutive validation failures
                 if self.should_exit_due_to_failures:
                     print()  # New line after recording status
@@ -1217,7 +1261,7 @@ class LivestreamSummarizer:
                     break
                 
                 # Check if FFmpeg process has exited (stream ended)
-                if self.recording_process and self.recording_process.poll() is not None:
+                if ffmpeg_has_exited:
                     print()  # New line after the recording status
                     exit_code = self.recording_process.returncode
                     runtime = time.time() - self.recording_start_time if self.recording_start_time else 0
@@ -1319,8 +1363,8 @@ class LivestreamSummarizer:
                                 no_growth_start = time.time()
                             elif time.time() - no_growth_start > STALL_TIMEOUT:
                                 print()  # New line after the recording status
-                                # Check if FFmpeg is still running
-                                if self.recording_process and self.recording_process.poll() is None:
+                                # Check if FFmpeg is still running (use cached result)
+                                if not ffmpeg_has_exited:
                                     # FFmpeg is still running but segments stopped - network stall
                                     stall_warning_count += 1
                                     logger.warning(f"No new segments for {STALL_TIMEOUT}s but FFmpeg still running - likely network stall (warning {stall_warning_count}/{MAX_STALL_WARNINGS})")
@@ -1376,7 +1420,7 @@ class LivestreamSummarizer:
                         logger.warning("Could not parse segment indices")
                 
                 # VOD mode: Check if download finished AND all segments processed
-                if self.is_vod_mode and self.recording_process and self.recording_process.poll() is not None:
+                if self.is_vod_mode and ffmpeg_has_exited:
                     # Download complete, check if all segments summarized
                     if not self.processing:  # No active summarization
                         segments_list = sorted(self.segments_dir.glob('segment_*.mp4'))
