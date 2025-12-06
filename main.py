@@ -63,9 +63,35 @@ INCLUDE_PREVIOUS_SUMMARIES = 3  # Number of previous summaries to include as con
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Create logs directory
+LOGS_DIR = Path(__file__).parent / "logs"
+LOGS_DIR.mkdir(exist_ok=True)
+
+# Generate unique log filename with timestamp
+from datetime import datetime
+LOG_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+LOG_FILE = LOGS_DIR / f"run_{LOG_TIMESTAMP}.log"
+
+# Configure logging with both console and file handlers
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Clear any existing handlers
+logger.handlers = []
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(console_handler)
+
+# File handler for this run
+file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+logger.info(f"Log file: {LOG_FILE}")
 
 # Suppress verbose HTTP logging from libraries
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -279,7 +305,7 @@ class LivestreamSummarizer:
             # CRITICAL: Keep pipe open! yt-dlp streams continuously to FFmpeg.
             # Closing stdout breaks the stream = audio-only or empty segments.
             
-            logger.info("VOD recording started: streaming merged container to FFmpeg for processing")
+            logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] VOD recording started: streaming merged container to FFmpeg for processing")
             
         else:
             # Live stream mode: Direct FFmpeg recording from HLS URL (original behavior)
@@ -318,12 +344,12 @@ class LivestreamSummarizer:
                 str(self.segments_dir / 'segment_%03d.mp4')
             ]
             
-            logger.info("Starting FFmpeg recording process with compression...")
+            logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting FFmpeg recording process with compression...")
             logger.info(f"Recording compressed segments to {self.segments_dir} ({SEGMENT_DURATION}s each)")
             
             self.recording_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=self.ffmpeg_log_file)
             self.yt_dlp_process = None  # No yt-dlp for live streams
-            logger.info("Live stream recording started")
+            logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Live stream recording started")
         
         logger.info("Compression settings: 720p H.264 @ 500k CBR video + 64k audio (optimized for speed)")
         self.recording_start_time = time.time()
@@ -344,11 +370,11 @@ class LivestreamSummarizer:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 if log_on_success:
-                    logger.info(f"Segment {segment_path.name} is valid")
+                    logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Segment {segment_path.name} validated successfully")
                 return True
             else:
                 if log_on_failure:
-                    logger.error(f"Segment {segment_path.name} is invalid: {result.stderr}")
+                    logger.error(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Segment {segment_path.name} is invalid: {result.stderr}")
                 return False
         except subprocess.TimeoutExpired:
             if log_on_failure:
@@ -365,7 +391,7 @@ class LivestreamSummarizer:
             logger.warning("Cannot restart recording in VOD mode")
             return False
         
-        logger.info("🔄 Restarting FFmpeg to recover from network stall...")
+        logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Restarting FFmpeg to recover from network stall...")
         
         try:
             # Stop current recording
@@ -386,18 +412,32 @@ class LivestreamSummarizer:
                 except:
                     pass
             
-            # Get current segment count to continue numbering
+            # Wait for file handles to be released
+            time.sleep(1)
+            
+            # Get current segment count and find the broken segment (the last one)
             segments = sorted(self.segments_dir.glob('segment_*.mp4'))
+            restart_segment = 0
+            
             if segments:
                 try:
                     max_index = max(int(seg.stem.split('_')[1]) for seg in segments)
-                    next_segment = max_index + 1
-                    logger.info(f"Resuming from segment {next_segment:03d}")
+                    broken_segment = self.segments_dir / f"segment_{max_index:03d}.mp4"
+                    
+                    # Delete the broken segment (it was being written when FFmpeg was interrupted)
+                    if broken_segment.exists():
+                        broken_size = broken_segment.stat().st_size
+                        broken_segment.unlink()
+                        logger.info(f"🗑️ Deleted broken segment {broken_segment.name} ({broken_size / (1024*1024):.1f} MB)")
+                    
+                    # Restart from the same segment number (to replace the broken one)
+                    restart_segment = max_index
+                    logger.info(f"Restarting from segment {restart_segment:03d} (replacing broken segment)")
                 except (ValueError, IndexError):
-                    next_segment = 0
+                    restart_segment = 0
                     logger.warning("Could not parse segment numbers, starting from 0")
             else:
-                next_segment = 0
+                restart_segment = 0
                 logger.info("No segments found, starting from 0")
             
             # Reopen log file
@@ -423,7 +463,7 @@ class LivestreamSummarizer:
                 '-i', self.hls_url,
                 '-f', 'segment',
                 '-segment_time', str(SEGMENT_DURATION),
-                '-segment_start_number', str(next_segment),  # Continue from where we left off
+                '-segment_start_number', str(restart_segment),  # Replace the broken segment
                 '-segment_wrap', '0',
                 '-reset_timestamps', '1',
                 '-c:v', 'h264_nvenc',
@@ -443,7 +483,7 @@ class LivestreamSummarizer:
             self.recording_start_time = time.time()
             time.sleep(3)  # Wait for FFmpeg to initialize
             
-            logger.info("✅ FFmpeg restarted successfully")
+            logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ FFmpeg restarted successfully")
             return True
             
         except Exception as e:
@@ -732,7 +772,8 @@ class LivestreamSummarizer:
         retry_delay = FFMPEG_RETRY_DELAY
         
         for attempt in range(1, max_retries + 1):
-            logger.info(f"Starting concatenation of {NUM_SEGMENTS} pre-compressed segments into {self.compressed_file} (attempt {attempt}/{max_retries})")
+            concat_start_time = datetime.now()
+            logger.info(f"[{concat_start_time.strftime('%Y-%m-%d %H:%M:%S')}] Starting concatenation of {NUM_SEGMENTS} pre-compressed segments into {self.compressed_file} (attempt {attempt}/{max_retries})")
             cmd = [
                 'ffmpeg',
                 '-y',  # Overwrite output file if exists
@@ -749,7 +790,9 @@ class LivestreamSummarizer:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 
                 if result.returncode == 0:
-                    logger.info(f"Concatenation completed successfully. Video file: {self.compressed_file} ({self.compressed_file.stat().st_size} bytes)")
+                    concat_end_time = datetime.now()
+                    concat_duration = (concat_end_time - concat_start_time).total_seconds()
+                    logger.info(f"[{concat_end_time.strftime('%Y-%m-%d %H:%M:%S')}] Concatenation completed successfully in {concat_duration:.1f}s. Video file: {self.compressed_file} ({self.compressed_file.stat().st_size} bytes)")
                     return True
                 else:
                     logger.warning(f"Concatenation attempt {attempt} failed: {result.stderr}")
@@ -1061,7 +1104,7 @@ class LivestreamSummarizer:
         if self.processing:
             return
             
-        logger.info("=== Starting summarization cycle ===")
+        logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] === Starting summarization cycle ===")
         self.processing = True
         
         # Keep recording running - process summarization in background
@@ -1077,98 +1120,281 @@ class LivestreamSummarizer:
         
         logger.info("=== Summarization cycle started (running in background) ===")
 
-    def process_remaining_segments(self):
+    def process_remaining_segments(self, concatenate_all: bool = False):
         """Process any remaining segments when stream ends.
         
-        This creates a final summary from leftover segments that weren't 
-        processed in regular cycles.
+        Args:
+            concatenate_all: If True, concatenate ALL remaining segments into one video
+                           (used for livestream where remaining is usually small).
+                           If False, process in cycles of NUM_SEGMENTS (used for VOD
+                           where remaining can be large).
+        
+        Livestream: concatenate_all=True → All remaining in 1 video (typically few segments)
+        VOD: concatenate_all=False → Process in cycles of 180s (can be many segments)
         """
-        logger.info("=== Processing remaining segments for final summary ===")
+        mode_desc = "single video" if concatenate_all else "cycles"
+        logger.info(f"=== Processing remaining segments ({mode_desc} mode) ===")
         
         # Wait for any ongoing processing to complete
         while self.processing:
             logger.info("Waiting for current processing to complete...")
             time.sleep(2)
         
+        # Get all remaining segments
         segments = sorted(self.segments_dir.glob('segment_*.mp4'))
         if not segments:
-            logger.info("No remaining segments to process")
+            logger.info("No segments found")
             return
         
-        # Get segments that haven't been processed yet
-        if self.last_end_index >= 0:
-            remaining_segments = [seg for seg in segments 
-                                 if int(seg.stem.split('_')[1]) > self.last_end_index]
-        else:
-            # No cycles completed, process all segments
-            remaining_segments = segments
+        # Get segment indices
+        try:
+            max_available_index = max(int(seg.stem.split('_')[1]) for seg in segments)
+        except (ValueError, IndexError):
+            logger.warning("Could not parse segment indices")
+            return
         
-        if not remaining_segments:
+        # Determine start index
+        if self.last_end_index == -1:
+            start_index = 0
+        else:
+            start_index = max(0, self.last_end_index - OVERLAP_SEGMENTS + 1)
+        
+        # Check if there are any unprocessed segments
+        if start_index > max_available_index:
             logger.info("All segments have been processed")
             return
         
-        logger.info(f"Found {len(remaining_segments)} unprocessed segments")
+        num_remaining = max_available_index - start_index + 1
+        logger.info(f"Remaining segments: {start_index} to {max_available_index} ({num_remaining} segments)")
         
-        # Create concat file with remaining segments
-        with open(self.concat_file, 'w') as f:
-            for seg in remaining_segments:
-                f.write(f"file '{seg}'\n")
-        
-        logger.info(f"Final concat file created with segments: {remaining_segments[0].name} to {remaining_segments[-1].name}")
-        
-        # Concatenate remaining segments
-        logger.info("Concatenating remaining segments...")
-        cmd = [
-            'ffmpeg',
-            '-y',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', str(self.concat_file),
-            '-c', 'copy',
-            str(self.compressed_file)
-        ]
-        
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode != 0:
-                logger.error(f"Failed to concatenate remaining segments: {result.stderr}")
+        # === CONCATENATE ALL MODE (Livestream) ===
+        if concatenate_all:
+            logger.info(f"Livestream mode: Concatenating all {num_remaining} remaining segments into one video")
+            
+            # Get all remaining segment files
+            remaining_segments = []
+            for i in range(start_index, max_available_index + 1):
+                seg_path = self.segments_dir / f"segment_{i:03d}.mp4"
+                if seg_path.exists():
+                    remaining_segments.append(seg_path)
+                else:
+                    logger.warning(f"Missing segment: {seg_path.name}")
+            
+            if not remaining_segments:
+                logger.info("No valid segments to process")
                 return
             
-            logger.info("Remaining segments concatenated successfully")
+            # Validate segments
+            valid_segments = []
+            for seg in remaining_segments:
+                if self.validate_segment(seg, log_on_success=False, log_on_failure=True):
+                    valid_segments.append(seg)
+                else:
+                    logger.warning(f"Skipping invalid segment: {seg.name}")
             
-            # Summarize the final video
-            logger.info("Generating final summary...")
+            if not valid_segments:
+                logger.warning("No valid segments found")
+                return
+            
+            total_duration = len(valid_segments) * SEGMENT_DURATION
+            logger.info(f"Processing {len(valid_segments)} valid segments (~{total_duration}s total)")
+            
+            # Create concat file
+            with open(self.concat_file, 'w') as f:
+                for seg in valid_segments:
+                    f.write(f"file '{seg}'\n")
+            
+            # Concatenate
+            concat_start_time = datetime.now()
+            logger.info(f"[{concat_start_time.strftime('%Y-%m-%d %H:%M:%S')}] Concatenating all remaining segments...")
+            
+            cmd = [
+                'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                '-i', str(self.concat_file), '-c', 'copy',
+                str(self.compressed_file)
+            ]
+            
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                if result.returncode != 0:
+                    logger.error(f"Failed to concatenate: {result.stderr}")
+                    return
+                
+                concat_end_time = datetime.now()
+                logger.info(f"[{concat_end_time.strftime('%Y-%m-%d %H:%M:%S')}] Concatenation completed")
+                
+            except Exception as e:
+                logger.error(f"Error concatenating: {e}")
+                return
+            
+            # Summarize with Gemini
+            gemini_start_time = datetime.now()
+            logger.info(f"[{gemini_start_time.strftime('%Y-%m-%d %H:%M:%S')}] Sending final video to Gemini...")
             
             summary = self.summarize_with_gemini()
             
             if summary:
-                timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-                
-                # Calculate elapsed time
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 elapsed_seconds = int(time.time() - self.program_start_time)
-                hours = elapsed_seconds // 3600
-                minutes = (elapsed_seconds % 3600) // 60
-                seconds = elapsed_seconds % 60
-                elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                elapsed_str = f"{elapsed_seconds // 3600:02d}:{(elapsed_seconds % 3600) // 60:02d}:{elapsed_seconds % 60:02d}"
                 
-                logger.info(f"Final summary received at {timestamp} (Total elapsed: {elapsed_str})")
-                print(f"\n--- FINAL Summary at {timestamp} (⏱️ Total: {elapsed_str}) ---\n{summary}\n")
+                logger.info(f"[{timestamp}] Final summary received (Elapsed: {elapsed_str})")
+                print(f"\n--- Final Summary at {timestamp} (⏱️ {elapsed_str}) ---\n{summary}\n")
                 summary_num = self.append_summary(summary, timestamp)
-                print(f"✅ Final summary #{summary_num} saved to summary-{self.stream_name}.txt")
+                print(f"✅ Final Summary #{summary_num} saved to summary-{self.stream_name}.txt")
             else:
                 logger.error("Failed to generate final summary")
             
-            # Clean up
+            # Cleanup
             if self.compressed_file.exists():
-                self.compressed_file.unlink()
-                logger.info("Deleted final compressed file")
-                
-        except subprocess.TimeoutExpired:
-            logger.error("Timeout while concatenating remaining segments")
-        except Exception as e:
-            logger.error(f"Error processing remaining segments: {e}")
+                try:
+                    self.compressed_file.unlink()
+                except:
+                    pass
+            
+            logger.info("=== Remaining segments processing completed (single video) ===")
+            return
         
-        logger.info("=== Final summary processing completed ===")
+        # === CYCLE MODE (VOD) ===
+        cycle_count = 0
+        
+        while True:
+            segments = sorted(self.segments_dir.glob('segment_*.mp4'))
+            if not segments:
+                logger.info("No segments found")
+                break
+            
+            # Get the highest segment index available
+            try:
+                max_available_index = max(int(seg.stem.split('_')[1]) for seg in segments)
+            except (ValueError, IndexError):
+                logger.warning("Could not parse segment indices")
+                break
+            
+            # Determine start index for this cycle
+            if self.last_end_index == -1:
+                start_index = 0
+            else:
+                start_index = max(0, self.last_end_index - OVERLAP_SEGMENTS + 1)
+            
+            end_index = start_index + NUM_SEGMENTS - 1
+            
+            # Check if we have enough segments for a full cycle
+            if end_index <= max_available_index:
+                logger.info(f"Processing cycle: segments {start_index} to {end_index} ({NUM_SEGMENTS} segments)")
+            elif start_index <= max_available_index:
+                # Partial cycle - process remaining segments
+                end_index = max_available_index
+                num_remaining = end_index - start_index + 1
+                
+                if num_remaining == 0:
+                    logger.info("All segments have been processed")
+                    break
+                    
+                logger.info(f"Processing final partial cycle: segments {start_index} to {end_index} ({num_remaining} segments)")
+            else:
+                logger.info("All segments have been processed")
+                break
+            
+            # Get segment files for this cycle
+            cycle_segments = []
+            for i in range(start_index, end_index + 1):
+                seg_path = self.segments_dir / f"segment_{i:03d}.mp4"
+                if seg_path.exists():
+                    cycle_segments.append(seg_path)
+                else:
+                    logger.warning(f"Missing segment: {seg_path.name}")
+            
+            if not cycle_segments:
+                logger.info("No valid segments for this cycle")
+                break
+            
+            # Validate segments
+            valid_segments = []
+            for seg in cycle_segments:
+                if self.validate_segment(seg, log_on_success=False, log_on_failure=True):
+                    valid_segments.append(seg)
+                else:
+                    logger.warning(f"Skipping invalid segment: {seg.name}")
+            
+            if not valid_segments:
+                logger.warning("No valid segments in this cycle, skipping")
+                self.last_end_index = end_index
+                continue
+            
+            # Create concat file
+            with open(self.concat_file, 'w') as f:
+                for seg in valid_segments:
+                    f.write(f"file '{seg}'\n")
+            
+            logger.info(f"Concat file created: {valid_segments[0].name} to {valid_segments[-1].name}")
+            
+            # Concatenate segments
+            concat_start_time = datetime.now()
+            logger.info(f"[{concat_start_time.strftime('%Y-%m-%d %H:%M:%S')}] Concatenating {len(valid_segments)} segments...")
+            
+            cmd = [
+                'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                '-i', str(self.concat_file), '-c', 'copy',
+                str(self.compressed_file)
+            ]
+            
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                if result.returncode != 0:
+                    logger.error(f"Failed to concatenate segments: {result.stderr}")
+                    self.last_end_index = end_index
+                    continue
+                
+                concat_end_time = datetime.now()
+                concat_duration = (concat_end_time - concat_start_time).total_seconds()
+                logger.info(f"[{concat_end_time.strftime('%Y-%m-%d %H:%M:%S')}] Concatenation completed in {concat_duration:.1f}s")
+                
+            except subprocess.TimeoutExpired:
+                logger.error("Timeout while concatenating segments")
+                self.last_end_index = end_index
+                continue
+            except Exception as e:
+                logger.error(f"Error concatenating segments: {e}")
+                self.last_end_index = end_index
+                continue
+            
+            # Update last_end_index
+            self.last_end_index = end_index
+            
+            # Summarize with Gemini
+            cycle_count += 1
+            gemini_start_time = datetime.now()
+            logger.info(f"[{gemini_start_time.strftime('%Y-%m-%d %H:%M:%S')}] Sending to Gemini (remaining cycle #{cycle_count})...")
+            
+            summary = self.summarize_with_gemini()
+            
+            if summary:
+                gemini_end_time = datetime.now()
+                gemini_duration = (gemini_end_time - gemini_start_time).total_seconds()
+                timestamp = gemini_end_time.strftime('%Y-%m-%d %H:%M:%S')
+                
+                elapsed_seconds = int(time.time() - self.program_start_time)
+                elapsed_str = f"{elapsed_seconds // 3600:02d}:{(elapsed_seconds % 3600) // 60:02d}:{elapsed_seconds % 60:02d}"
+                
+                logger.info(f"[{timestamp}] Summary received (Gemini took {gemini_duration:.1f}s, Elapsed: {elapsed_str})")
+                print(f"\n--- Summary at {timestamp} (⏱️ {elapsed_str}) ---\n{summary}\n")
+                summary_num = self.append_summary(summary, timestamp)
+                print(f"✅ Summary #{summary_num} saved to summary-{self.stream_name}.txt")
+            else:
+                logger.error("Failed to generate summary for this cycle")
+            
+            # Clean up compressed file
+            if self.compressed_file.exists():
+                try:
+                    self.compressed_file.unlink()
+                except:
+                    pass
+            
+            # Clean up old segments
+            self.cleanup_old_segments()
+        
+        logger.info("=== Remaining segments processing completed (cycles) ===")
 
     def _background_summarization(self):
         """Background thread for video processing and Gemini summarization.
@@ -1177,7 +1403,8 @@ class LivestreamSummarizer:
         compression step is needed. Concatenation outputs directly to compressed_file.
         """
         try:
-            logger.info("Sending pre-compressed video to Gemini for summarization...")
+            gemini_start_time = datetime.now()
+            logger.info(f"[{gemini_start_time.strftime('%Y-%m-%d %H:%M:%S')}] Sending pre-compressed video to Gemini for summarization...")
             
             # Retry logic for Gemini summarization
             max_retries = GEMINI_MAX_RETRIES
@@ -1191,7 +1418,9 @@ class LivestreamSummarizer:
                 summary = self.summarize_with_gemini()
                 
                 if summary:
-                    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+                    gemini_end_time = datetime.now()
+                    gemini_duration = (gemini_end_time - gemini_start_time).total_seconds()
+                    timestamp = gemini_end_time.strftime('%Y-%m-%d %H:%M:%S')
                     
                     # Calculate elapsed time
                     elapsed_seconds = int(time.time() - self.program_start_time)
@@ -1200,7 +1429,7 @@ class LivestreamSummarizer:
                     seconds = elapsed_seconds % 60
                     elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
                     
-                    logger.info(f"Summary received at {timestamp} (Elapsed: {elapsed_str})")
+                    logger.info(f"[{timestamp}] Summary received (Gemini took {gemini_duration:.1f}s, Elapsed: {elapsed_str})")
                     print(f"\n--- Summary at {timestamp} (⏱️ {elapsed_str}) ---\n{summary}\n")
                     # Append to single summary file with stream name
                     summary_num = self.append_summary(summary, timestamp)
@@ -1256,7 +1485,9 @@ class LivestreamSummarizer:
                     print()  # New line after recording status
                     logger.error("🛑 Exiting due to consecutive segment validation failures")
                     logger.info("Processing remaining valid segments before exit...")
-                    self.process_remaining_segments()
+                    # Livestream: concatenate all remaining into 1 video
+                    # VOD: process in cycles
+                    self.process_remaining_segments(concatenate_all=not self.is_vod_mode)
                     logger.info("All processing completed. Exiting.")
                     break
                 
@@ -1341,8 +1572,8 @@ class LivestreamSummarizer:
                             # Wait a moment for any final segments to be written
                             time.sleep(3)
                             
-                            # Process any remaining segments
-                            self.process_remaining_segments()
+                            # Process any remaining segments (concatenate all for livestream)
+                            self.process_remaining_segments(concatenate_all=True)
                             
                             logger.info("All processing completed. Exiting.")
                             break
@@ -1374,7 +1605,8 @@ class LivestreamSummarizer:
                                         logger.warning(f"Stream stalled for {STALL_TIMEOUT * MAX_STALL_WARNINGS}s total ({MAX_STALL_WARNINGS} restart attempts failed). Considering stream ended.")
                                         logger.info("Processing remaining segments...")
                                         self.stop_recording()
-                                        self.process_remaining_segments()
+                                        # Livestream stall: concatenate all remaining into 1 video
+                                        self.process_remaining_segments(concatenate_all=True)
                                         logger.info("All processing completed. Exiting.")
                                         break
                                     else:
@@ -1399,7 +1631,8 @@ class LivestreamSummarizer:
                                         # Live stream: FFmpeg exited + no new segments = stream truly ended
                                         logger.warning(f"No new segments detected for {STALL_TIMEOUT} seconds and FFmpeg has exited")
                                         logger.info("Processing remaining segments...")
-                                        self.process_remaining_segments()
+                                        # Livestream: concatenate all remaining into 1 video
+                                        self.process_remaining_segments(concatenate_all=True)
                                         logger.info("All processing completed. Exiting.")
                                         break
                         else:
@@ -1480,7 +1713,9 @@ class LivestreamSummarizer:
             logger.info("Stopping...")
             self.stop_recording()
             logger.info("Processing any remaining segments...")
-            self.process_remaining_segments()
+            # Livestream: concatenate all remaining into 1 video
+            # VOD: process in cycles
+            self.process_remaining_segments(concatenate_all=not self.is_vod_mode)
 
 def main():
     if len(sys.argv) < 2 or len(sys.argv) > 3:
@@ -1526,19 +1761,25 @@ def main():
         if not stream_name:
             try:
                 # Get video title to use as stream name
+                # Use --encoding utf-8 to properly handle Japanese/Unicode titles on Windows
                 title_result = subprocess.run(
-                    ['yt-dlp', '--get-title', url],
+                    ['yt-dlp', '--encoding', 'utf-8', '--get-title', url],
                     capture_output=True,
-                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     timeout=30
                 )
                 if title_result.returncode == 0 and title_result.stdout.strip():
-                    # Sanitize title for filename (allow Unicode characters)
+                    # Sanitize title for filename (allow Unicode characters including Japanese)
                     import re
-                    # Remove only characters that are problematic for filenames
-                    # Keep Unicode letters, numbers, spaces, hyphens, underscores
-                    stream_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', title_result.stdout.strip())
-                    stream_name = re.sub(r'[-\s]+', '-', stream_name)[:50]  # Limit length
+                    raw_title = title_result.stdout.strip()
+                    # Remove only characters that are problematic for filenames on Windows
+                    # Keep Unicode letters (Japanese, etc.), numbers, spaces, hyphens, underscores
+                    stream_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', raw_title)
+                    # Replace multiple spaces/hyphens with single hyphen, but keep Japanese chars
+                    stream_name = re.sub(r'[\s]+', '-', stream_name)  # Spaces to hyphens
+                    stream_name = re.sub(r'-+', '-', stream_name)  # Multiple hyphens to single
+                    stream_name = stream_name.strip('-')[:80]  # Increased limit for Japanese titles
                     print(f"Stream name: {stream_name}")
             except Exception as e:
                 print(f"Could not get stream name: {e}")
