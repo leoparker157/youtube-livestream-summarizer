@@ -53,12 +53,12 @@ GEMINI_MAX_RETRIES = 3  # Number of retries for Gemini API calls
 GEMINI_RETRY_DELAY = 30  # Seconds to wait between Gemini retries
 
 # Stream Monitoring Configuration
-STALL_TIMEOUT = 20 + SEGMENT_DURATION  # Seconds to wait before checking if stream has stalled (must be > SEGMENT_DURATION to avoid false positives)
+STALL_TIMEOUT = 1 + SEGMENT_DURATION  # Seconds to wait before checking if stream has stalled (must be > SEGMENT_DURATION to avoid false positives)
 MAX_STALL_WARNINGS = 3  # Number of consecutive stall warnings before considering stream ended (total: STALL_TIMEOUT * MAX_STALL_WARNINGS)
 
 # Gemini Configuration
 USE_GOOGLE_SEARCH = False  # Enable/disable Google Search grounding tool in Gemini
-INCLUDE_PREVIOUS_SUMMARIES = 3  # Number of previous summaries to include as context (0 = none, 1+ = include that many for continuity)
+INCLUDE_PREVIOUS_SUMMARIES = 1  # Number of previous summaries to include as context (0 = none, 1+ = include that many for continuity)
 
 # Load environment variables
 load_dotenv()
@@ -1469,6 +1469,7 @@ class LivestreamSummarizer:
         current_recording_size = 0
         no_growth_start = None
         last_max_index = -1
+        last_segment_size = 0  # Track current segment's file size for stall detection
         stall_warning_count = 0  # Track consecutive stall warnings
         vod_complete_logged = False  # Track if VOD completion message already shown
         ffmpeg_exited = False  # Track if FFmpeg has exited (stop recording status display)
@@ -1589,8 +1590,22 @@ class LivestreamSummarizer:
                         current_max_index = max(int(seg.stem.split('_')[1]) for seg in segments if seg.stem.split('_')[1].isdigit())
                         
                         # Detect stalled recording (no new segments for STALL_TIMEOUT seconds)
+                        # Also check if current segment is still growing (reset timer if size changes)
+                        current_segment_path = self.segments_dir / f"segment_{current_max_index:03d}.mp4"
+                        current_segment_size = 0
+                        if current_segment_path.exists():
+                            try:
+                                current_segment_size = current_segment_path.stat().st_size
+                            except OSError:
+                                pass
+                        
                         if current_max_index == last_max_index:
-                            if no_growth_start is None:
+                            # Check if current segment size is still growing
+                            if current_segment_size != last_segment_size and current_segment_size > 0:
+                                # Segment is still being written, reset stall timer
+                                no_growth_start = None
+                                last_segment_size = current_segment_size
+                            elif no_growth_start is None:
                                 no_growth_start = time.time()
                             elif time.time() - no_growth_start > STALL_TIMEOUT:
                                 print()  # New line after the recording status
@@ -1638,6 +1653,7 @@ class LivestreamSummarizer:
                         else:
                             no_growth_start = None
                             last_max_index = current_max_index
+                            last_segment_size = 0  # Reset size tracking for new segment
                             stall_warning_count = 0  # Reset counter when new segments arrive
                         
                         if self.last_end_index == -1:
