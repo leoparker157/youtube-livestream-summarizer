@@ -30,14 +30,23 @@ You can customize the behavior by modifying constants in `main.py`:
 
 ```python
 # Video Processing
-VIDEO_DURATION_SECONDS = 120  # Duration of video clips to send to Gemini (in seconds)
-SEGMENT_DURATION = 60  # Duration of each video segment (minimum 60s to avoid rate limits)
+VIDEO_DURATION_SECONDS = 180  # Duration of video clips to send to Gemini (minimum 60s)
+SEGMENT_DURATION = 30  # Duration of each video segment (in seconds)
 OVERLAP_SEGMENTS = 0  # Number of overlapping segments between cycles
+
+# Retry Configuration
+FFMPEG_MAX_RETRIES = 3  # Number of retries for FFmpeg operations
+FFMPEG_RETRY_DELAY = 120  # Seconds to wait between FFmpeg retries
+GEMINI_MAX_RETRIES = 3  # Number of retries for Gemini API calls
+GEMINI_RETRY_DELAY = 30  # Seconds to wait between Gemini retries
+
+# Stream Monitoring
+STALL_TIMEOUT = 15 + SEGMENT_DURATION  # Seconds before detecting stream stall
+MAX_STALL_WARNINGS = 3  # Consecutive stall warnings before stream is considered ended
 
 # Gemini Features
 USE_GOOGLE_SEARCH = False  # Enable/disable Google Search grounding tool
-INCLUDE_PREVIOUS_SUMMARIES = 0  # Number of previous summaries to include as context
-                                # (0 = none, 1+ = include that many for continuity)
+INCLUDE_PREVIOUS_SUMMARIES = 0  # Number of previous summaries for context (0 = none)
 ```
 
 The program will automatically adjust the number of segments and processing accordingly.
