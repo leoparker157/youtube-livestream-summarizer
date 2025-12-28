@@ -41,12 +41,12 @@ GEMINI_MAX_RETRIES = 3  # Number of retries for Gemini API calls
 GEMINI_RETRY_DELAY = 30  # Seconds to wait between Gemini retries
 
 # Stream Monitoring
-STALL_TIMEOUT = 15 + SEGMENT_DURATION  # Seconds before detecting stream stall
+STALL_TIMEOUT = 1 + SEGMENT_DURATION  # Seconds before detecting stream stall
 MAX_STALL_WARNINGS = 3  # Consecutive stall warnings before stream is considered ended
 
 # Gemini Features
 USE_GOOGLE_SEARCH = False  # Enable/disable Google Search grounding tool
-INCLUDE_PREVIOUS_SUMMARIES = 0  # Number of previous summaries for context (0 = none)
+INCLUDE_PREVIOUS_SUMMARIES = 1  # Number of previous summaries for context (0 = none)
 ```
 
 The program will automatically adjust the number of segments and processing accordingly.
