@@ -6,6 +6,7 @@
 This Python program automatically records and summarizes YouTube livestreams in real time using FFmpeg and Google's Gemini API.
 # Demo/example: 
 https://github.com/user-attachments/assets/4ab3ae68-39c8-409c-9eee-bf9a20cb05ad
+-->The accuracy of the summary depends heavily on the Gemini model used, and the summary style depends on the prompt you provide.
 
 ## 🚀 Quick Start
 
