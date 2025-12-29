@@ -1,13 +1,11 @@
-# Demo/example: 
-
-Uploading Screen Recording 2025-12-28 193753.mp4…
-
 
 # YouTube Livestream Summarizer
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/leoparker157/youtube-livestream-summarizer/blob/main/YouTube_Livestream_Summarizer.ipynb)
 
 This Python program automatically records and summarizes YouTube livestreams in real time using FFmpeg and Google's Gemini API.
+# Demo/example: 
+https://github.com/user-attachments/assets/4ab3ae68-39c8-409c-9eee-bf9a20cb05ad
 
 ## 🚀 Quick Start
 
