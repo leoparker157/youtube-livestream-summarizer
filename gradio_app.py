@@ -38,9 +38,10 @@ VIDEO_PRESET = 'fast'                           # h264_nvenc preset (only used i
 VIDEO_RC_MODE = 'cbr'                           # Rate control mode (only used if VIDEO_CODEC_MODE='encode')
 AUDIO_BITRATE = '64k'                           # Audio bitrate (only used if VIDEO_CODEC_MODE='encode')
 
-# Segment Settings
-SEGMENT_STALL_TIMEOUT = 10                       # Seconds to wait before detecting stall
+# Segment Settings (Note: SEGMENT_STALL_TIMEOUT is calculated dynamically based on segment_duration in run_summarizer)
+SEGMENT_STALL_TIMEOUT_BASE = 1                  # Base seconds to add to segment_duration for stall timeout
 FFMPEG_RESTART_COOLDOWN = 30                    # Minimum seconds between FFmpeg restarts
+MAX_STALL_WARNINGS = 3                          # Number of consecutive stall warnings before considering stream ended
 
 # Concatenation & Retry Settings
 CONCAT_MAX_RETRIES = 3                          # Max retries for FFmpeg concatenation
@@ -79,6 +80,7 @@ class LivestreamSummarizerGradio:
         self.last_segment_size = 0  # Track segment size changes
         self.ffmpeg_restart_count = 0  # Track how many times we've restarted FFmpeg
         self.last_restart_time = 0  # Track when we last restarted
+        self.stall_warning_count = 0  # Track consecutive stall warnings (like main.py)
         self.processing = False
         self.should_stop = False
         self.last_end_index = -1
@@ -706,6 +708,7 @@ class LivestreamSummarizerGradio:
         self.last_segment_size = 0  # Reset segment size tracking
         self.ffmpeg_restart_count = 0  # Reset restart counter
         self.last_restart_time = 0  # Reset restart time
+        self.stall_warning_count = 0  # Reset stall warning counter (like main.py)
         self.youtube_url = youtube_url  # Store for FFmpeg restart
         self.is_vod = False  # Reset VOD flag
         self.is_vod_mode = False  # Reset VOD mode flag
@@ -713,6 +716,9 @@ class LivestreamSummarizerGradio:
         self.last_gemini_call_time = 0  # Reset rate limiting
         self.consecutive_validation_failures = 0  # Reset validation failure counter
         self.should_exit_due_to_failures = False  # Reset exit flag
+        
+        # Calculate dynamic stall timeout based on segment duration (like main.py's STALL_TIMEOUT = 1 + SEGMENT_DURATION)
+        segment_stall_timeout = SEGMENT_STALL_TIMEOUT_BASE + segment_duration
         
         # Detect if VOD or live stream
         if 'youtube.com' in youtube_url or 'youtu.be' in youtube_url:
@@ -1052,11 +1058,18 @@ class LivestreamSummarizerGradio:
                                     # Size hasn't changed - check for stall
                                     if finalizing_stall_start is None:
                                         finalizing_stall_start = time.time()
-                                    elif time.time() - finalizing_stall_start >= SEGMENT_STALL_TIMEOUT:
+                                    elif time.time() - finalizing_stall_start >= segment_stall_timeout:
                                         # Stalled for configured timeout during finalization
                                         stall_duration = int(time.time() - finalizing_stall_start)
                                         size_mb = current_size / (1024 * 1024)
-                                        yield self.log_progress(f"🚨 STALL DETECTED: {last_segment_path.name} not growing for {stall_duration}s at {size_mb:.1f} MB"), "\n".join(self.summaries)
+                                        self.stall_warning_count += 1
+                                        yield self.log_progress(f"🚨 STALL DETECTED: {last_segment_path.name} not growing for {stall_duration}s at {size_mb:.1f} MB (warning {self.stall_warning_count}/{MAX_STALL_WARNINGS})"), "\n".join(self.summaries)
+                                        
+                                        # Check if exceeded max warnings
+                                        if self.stall_warning_count >= MAX_STALL_WARNINGS:
+                                            yield self.log_progress(f"🛑 Stream stalled for {segment_stall_timeout * MAX_STALL_WARNINGS}s total ({MAX_STALL_WARNINGS} warnings). Considering stream ended."), "\n".join(self.summaries)
+                                            self.should_stop = True
+                                            break
                                         
                                         # Check restart cooldown
                                         if time.time() - self.last_restart_time < FFMPEG_RESTART_COOLDOWN:
@@ -1166,10 +1179,17 @@ class LivestreamSummarizerGradio:
                                 if self.segment_stall_check_time is None:
                                     # First time detecting no growth - start timer
                                     self.segment_stall_check_time = time.time()
-                                elif time.time() - self.segment_stall_check_time >= SEGMENT_STALL_TIMEOUT:
-                                    # File hasn't grown for configured timeout - RESTART FFmpeg
+                                elif time.time() - self.segment_stall_check_time >= segment_stall_timeout:
+                                    # File hasn't grown for configured timeout - check stall warnings
                                     stall_duration = int(time.time() - self.segment_stall_check_time)
-                                    yield self.log_progress(f"🚨 STALL DETECTED: {current_segment.name} not growing for {stall_duration}s at {size_mb:.1f} MB"), "\n".join(self.summaries)
+                                    self.stall_warning_count += 1
+                                    yield self.log_progress(f"🚨 STALL DETECTED: {current_segment.name} not growing for {stall_duration}s at {size_mb:.1f} MB (warning {self.stall_warning_count}/{MAX_STALL_WARNINGS})"), "\n".join(self.summaries)
+                                    
+                                    # Check if exceeded max warnings
+                                    if self.stall_warning_count >= MAX_STALL_WARNINGS:
+                                        yield self.log_progress(f"🛑 Stream stalled for {segment_stall_timeout * MAX_STALL_WARNINGS}s total ({MAX_STALL_WARNINGS} warnings). Considering stream ended."), "\n".join(self.summaries)
+                                        self.should_stop = True
+                                        break
                                     
                                     # Prevent restart spam
                                     if time.time() - self.last_restart_time < FFMPEG_RESTART_COOLDOWN:
@@ -1179,17 +1199,19 @@ class LivestreamSummarizerGradio:
                                         
                                         if self.restart_ffmpeg(segment_duration, segments_dir):
                                             yield self.log_progress("✅ FFmpeg restarted successfully"), "\n".join(self.summaries)
+                                            self.segment_stall_check_time = time.time()  # Reset timer after restart (like main.py)
                                         else:
                                             yield self.log_progress("❌ FFmpeg restart failed - stopping"), "\n".join(self.summaries)
                                             self.should_stop = True
                                             break
                             else:
-                                # File is growing - reset stall detection
+                                # File is growing - reset stall detection AND stall warning count
                                 if self.segment_stall_check_time is not None:
                                     # Was stalled, now growing again
                                     yield self.log_progress(f"✅ Recording resumed: {current_segment.name} now at {size_mb:.1f} MB"), "\n".join(self.summaries)
                                 self.segment_stall_check_time = None
                                 self.last_segment_size = current_size
+                                self.stall_warning_count = 0  # Reset warning count when segments grow (like main.py)
                             
                             # Show as "Finalizing" if we have valid max_index and it's the last segment needed
                             if max_index >= 0:
