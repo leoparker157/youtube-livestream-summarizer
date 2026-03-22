@@ -8,6 +8,7 @@ Automatically records and summarizes YouTube livestreams using FFmpeg and Gemini
 import os
 import sys
 import time
+import queue
 import logging
 import subprocess
 import threading
@@ -97,12 +98,320 @@ logger.info(f"Log file: {LOG_FILE}")
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('google').setLevel(logging.WARNING)
 
+class FloatingSummaryOverlay:
+    """Floating desktop overlay that shows the latest completed summary."""
+
+    DEFAULT_WIDTH = 520
+    DEFAULT_HEIGHT = 240
+    MIN_WIDTH = 320
+    MIN_HEIGHT = 180
+    EDGE_PADDING = 24
+    WINDOW_ALPHA = 0.88
+    BG_COLOR = "#111318"
+    PANEL_COLOR = "#161a21"
+    HEADER_COLOR = "#1d2330"
+    TEXT_COLOR = "#f5f7fb"
+    MUTED_TEXT_COLOR = "#9ea6b5"
+    ACCENT_COLOR = "#5aa9ff"
+
+    def __init__(self):
+        self._queue = queue.Queue()
+        self._ready_event = threading.Event()
+        self._closed_event = threading.Event()
+        self._thread = None
+        self._root = None
+        self._text_widget = None
+        self._meta_label = None
+        self._drag_origin = None
+        self._resize_origin = None
+        self._screen_width = None
+        self._screen_height = None
+        self._enabled = True
+
+    def start(self):
+        """Start the overlay UI thread."""
+        if not self._enabled or self._thread is not None:
+            return self._enabled and not self._closed_event.is_set()
+
+        self._thread = threading.Thread(target=self._run_ui, name="FloatingSummaryOverlay", daemon=True)
+        self._thread.start()
+        self._ready_event.wait(timeout=5)
+        return self._enabled and not self._closed_event.is_set()
+
+    def update_summary(self, summary_text, timestamp, summary_num):
+        """Queue a new summary for display."""
+        if not self._enabled or self._closed_event.is_set():
+            return
+        self._queue.put(("summary", summary_text, timestamp, summary_num))
+
+    def close(self):
+        """Close the overlay if it is still running."""
+        if not self._enabled or self._closed_event.is_set():
+            return
+        self._queue.put(("close",))
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3)
+
+    def _run_ui(self):
+        try:
+            import tkinter as tk
+        except Exception as exc:
+            self._enabled = False
+            self._closed_event.set()
+            self._ready_event.set()
+            logger.warning(f"Floating overlay disabled: tkinter unavailable ({exc})")
+            return
+
+        try:
+            root = tk.Tk()
+            self._root = root
+            root.withdraw()
+            root.overrideredirect(True)
+            root.attributes("-topmost", True)
+            root.attributes("-alpha", self.WINDOW_ALPHA)
+            root.configure(bg=self.BG_COLOR)
+
+            self._screen_width = root.winfo_screenwidth()
+            self._screen_height = root.winfo_screenheight()
+
+            self._build_window(tk, root)
+            self._place_default_geometry()
+            root.deiconify()
+            root.after(100, self._process_queue)
+            logger.info("Floating summary overlay started")
+            self._ready_event.set()
+            root.mainloop()
+        except Exception as exc:
+            self._enabled = False
+            logger.warning(f"Floating overlay disabled: failed to start UI ({exc})")
+        finally:
+            self._closed_event.set()
+            self._ready_event.set()
+            self._root = None
+            self._text_widget = None
+            self._meta_label = None
+
+    def _build_window(self, tk, root):
+        root.grid_columnconfigure(0, weight=1)
+        root.grid_rowconfigure(0, weight=1)
+
+        panel = tk.Frame(root, bg=self.PANEL_COLOR, highlightbackground="#2a3342", highlightthickness=1)
+        panel.grid(row=0, column=0, sticky="nsew")
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(1, weight=1)
+
+        header = tk.Frame(panel, bg=self.HEADER_COLOR, padx=10, pady=8)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+
+        title_label = tk.Label(
+            header,
+            text="Latest summary",
+            bg=self.HEADER_COLOR,
+            fg=self.TEXT_COLOR,
+            font=("Segoe UI Semibold", 10),
+            anchor="w"
+        )
+        title_label.grid(row=0, column=0, sticky="w")
+
+        close_button = tk.Button(
+            header,
+            text="x",
+            command=self._close_from_ui,
+            bg=self.HEADER_COLOR,
+            fg=self.TEXT_COLOR,
+            activebackground="#2b3240",
+            activeforeground=self.TEXT_COLOR,
+            relief="flat",
+            bd=0,
+            padx=6,
+            pady=0,
+            font=("Segoe UI", 10)
+        )
+        close_button.grid(row=0, column=1, sticky="e")
+
+        body = tk.Frame(panel, bg=self.PANEL_COLOR, padx=10, pady=8)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(1, weight=1)
+
+        self._meta_label = tk.Label(
+            body,
+            text="Waiting for the first summary...",
+            bg=self.PANEL_COLOR,
+            fg=self.MUTED_TEXT_COLOR,
+            anchor="w",
+            font=("Segoe UI", 9)
+        )
+        self._meta_label.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        text_container = tk.Frame(body, bg=self.PANEL_COLOR)
+        text_container.grid(row=1, column=0, sticky="nsew")
+        text_container.grid_columnconfigure(0, weight=1)
+        text_container.grid_rowconfigure(0, weight=1)
+
+        scrollbar = tk.Scrollbar(text_container, troughcolor=self.PANEL_COLOR, activebackground="#3b4657")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self._text_widget = tk.Text(
+            text_container,
+            wrap="word",
+            bg=self.PANEL_COLOR,
+            fg=self.TEXT_COLOR,
+            insertbackground=self.TEXT_COLOR,
+            selectbackground="#29476a",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            padx=2,
+            pady=2,
+            yscrollcommand=scrollbar.set,
+            font=("Segoe UI", 10),
+            cursor="fleur"
+        )
+        self._text_widget.grid(row=0, column=0, sticky="nsew")
+        scrollbar.config(command=self._text_widget.yview)
+        self._set_text("Waiting for the first summary...")
+
+        grip = tk.Label(
+            panel,
+            text="///",
+            bg=self.PANEL_COLOR,
+            fg=self.ACCENT_COLOR,
+            cursor="bottom_right_corner",
+            padx=8,
+            pady=4,
+            font=("Consolas", 8)
+        )
+        grip.place(relx=1.0, rely=1.0, anchor="se")
+
+        self._bind_drag(root, panel)
+        self._bind_drag(root, header)
+        self._bind_drag(root, body)
+        self._bind_drag(root, title_label)
+        self._bind_drag(root, self._meta_label)
+        self._bind_drag(root, self._text_widget)
+
+        grip.bind("<ButtonPress-1>", self._start_resize)
+        grip.bind("<B1-Motion>", self._perform_resize)
+        grip.bind("<ButtonRelease-1>", self._stop_resize)
+
+        root.bind("<Escape>", lambda _event: self._close_from_ui())
+
+    def _bind_drag(self, root, widget):
+        widget.bind("<ButtonPress-1>", self._start_drag)
+        widget.bind("<B1-Motion>", self._perform_drag)
+        widget.bind("<ButtonRelease-1>", self._stop_drag)
+
+    def _place_default_geometry(self):
+        width = self.DEFAULT_WIDTH
+        height = self.DEFAULT_HEIGHT
+        x = max(self.EDGE_PADDING, self._screen_width - width - self.EDGE_PADDING)
+        y = self.EDGE_PADDING
+        self._root.geometry(f"{width}x{height}+{x}+{y}")
+        self._root.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
+
+    def _process_queue(self):
+        if self._closed_event.is_set() or not self._root:
+            return
+
+        try:
+            while True:
+                item = self._queue.get_nowait()
+                action = item[0]
+                if action == "summary":
+                    _, summary_text, timestamp, summary_num = item
+                    self._meta_label.config(text=f"Summary #{summary_num} at {timestamp}")
+                    self._set_text(summary_text)
+                elif action == "close":
+                    self._close_from_ui()
+                    return
+        except queue.Empty:
+            pass
+
+        self._root.after(100, self._process_queue)
+
+    def _set_text(self, text):
+        if not self._text_widget:
+            return
+        self._text_widget.config(state="normal")
+        self._text_widget.delete("1.0", "end")
+        self._text_widget.insert("1.0", text.strip() or "Waiting for the first summary...")
+        self._text_widget.see("1.0")
+        self._text_widget.config(state="disabled")
+
+    def _start_drag(self, event):
+        if not self._root:
+            return
+        self._drag_origin = (
+            event.x_root,
+            event.y_root,
+            self._root.winfo_x(),
+            self._root.winfo_y()
+        )
+
+    def _perform_drag(self, event):
+        if not self._root or not self._drag_origin:
+            return
+
+        origin_x, origin_y, window_x, window_y = self._drag_origin
+        delta_x = event.x_root - origin_x
+        delta_y = event.y_root - origin_y
+        width = self._root.winfo_width()
+        height = self._root.winfo_height()
+
+        new_x = self._clamp(eventual=window_x + delta_x, minimum=0, maximum=max(0, self._screen_width - width))
+        new_y = self._clamp(eventual=window_y + delta_y, minimum=0, maximum=max(0, self._screen_height - height))
+        self._root.geometry(f"{width}x{height}+{new_x}+{new_y}")
+
+    def _stop_drag(self, _event):
+        self._drag_origin = None
+
+    def _start_resize(self, event):
+        if not self._root:
+            return
+        self._resize_origin = (
+            event.x_root,
+            event.y_root,
+            self._root.winfo_width(),
+            self._root.winfo_height(),
+            self._root.winfo_x(),
+            self._root.winfo_y()
+        )
+
+    def _perform_resize(self, event):
+        if not self._root or not self._resize_origin:
+            return
+
+        start_x, start_y, start_width, start_height, window_x, window_y = self._resize_origin
+        max_width = max(self.MIN_WIDTH, int(self._screen_width * 0.85) - window_x)
+        max_height = max(self.MIN_HEIGHT, int(self._screen_height * 0.85) - window_y)
+        width = self._clamp(start_width + (event.x_root - start_x), self.MIN_WIDTH, max_width)
+        height = self._clamp(start_height + (event.y_root - start_y), self.MIN_HEIGHT, max_height)
+        self._root.geometry(f"{width}x{height}+{window_x}+{window_y}")
+
+    def _stop_resize(self, _event):
+        self._resize_origin = None
+
+    def _close_from_ui(self):
+        if self._closed_event.is_set():
+            return
+        logger.info("Floating summary overlay closed")
+        self._closed_event.set()
+        if self._root:
+            self._root.after_idle(self._root.destroy)
+
+    @staticmethod
+    def _clamp(eventual, minimum, maximum):
+        return max(minimum, min(maximum, int(eventual)))
+
 class LivestreamSummarizer:
-    def __init__(self, hls_url: str, api_key: str, stream_name: str = None, custom_prompt: str = None, is_vod: bool = False):
+    def __init__(self, hls_url: str, api_key: str, stream_name: str = None, custom_prompt: str = None, is_vod: bool = False, overlay=None):
         self.hls_url = hls_url
         self.api_key = api_key
         self.stream_name = stream_name or "stream"
         self.is_vod = is_vod  # Flag to indicate if this is VOD (uses yt-dlp pipe)
+        self.overlay = overlay
         
         # Default prompt if none provided
         self.custom_prompt = custom_prompt or """liveposting, summary detail this stream for me in english
@@ -920,7 +1229,7 @@ class LivestreamSummarizer:
             for attempt in range(max_retries):
                 try:
                     response = self.client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-3.1-flash-lite-preview',
                         contents=[
                             types.Part.from_text(text=final_prompt),
                             types.Part.from_uri(file_uri=video_file.uri, mime_type=video_file.mime_type)
@@ -1046,6 +1355,11 @@ class LivestreamSummarizer:
             f.write(entry)
         
         logger.info(f"Summary #{summary_num} appended to {summary_file.name}")
+        if self.overlay:
+            try:
+                self.overlay.update_summary(summary_text, timestamp, summary_num)
+            except Exception as e:
+                logger.warning(f"Failed to update floating overlay: {e}")
         return summary_num
 
     def cleanup_old_segments(self):
@@ -1869,8 +2183,27 @@ def main():
         print("Using default prompt")
     
     print(f"Summary file: summary-{stream_name}.txt")
-    summarizer = LivestreamSummarizer(hls_url, api_key, stream_name, custom_prompt, is_vod=is_vod)
-    summarizer.run()
+
+    overlay = FloatingSummaryOverlay()
+    overlay_started = overlay.start()
+    if overlay_started:
+        print("Floating summary overlay enabled")
+    else:
+        print("Floating summary overlay unavailable, continuing without it")
+
+    summarizer = LivestreamSummarizer(
+        hls_url,
+        api_key,
+        stream_name,
+        custom_prompt,
+        is_vod=is_vod,
+        overlay=overlay if overlay_started else None
+    )
+
+    try:
+        summarizer.run()
+    finally:
+        overlay.close()
 
 if __name__ == "__main__":
     main()
